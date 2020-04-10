@@ -1,7 +1,14 @@
 # Changelog
 ## Unreleased
 ### added
+* 增加了基金详细股票和债券持仓的信息，可以通过 ``fundinfo.get_holdings(year, season)`` 调用
+### fixed
+* 修复了基金信息爬取的大量 corner cases, 包括 .5 年的记法，定开和封闭基金赎回费率的特殊写法，已终止基金的赎回费率处理，净值为空基金的报错，js 页面有大量换行的正则兼容
+
+## v0.8.6 - 2020.04.09
+### added
 * mulfix 增加 istatus 账单读入
+* get_rt 针对基金扩充更多元数据
 ### fixed
 * 修复雪球实时HK开始的可能bug
 * 今日交易记录的 trade bug
