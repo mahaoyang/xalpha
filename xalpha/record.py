@@ -21,6 +21,10 @@ class record:
     2. 对于赎回的负数，如果是一个绝对值小于 0.005 的数，标记了赎回的份额占当时总份额的比例而非赎回的份额数目，
     其中0.005对应全部赎回，线性类推。eg. 0.001对应赎回20%。
 
+    3. 账单上自定义申购费和赎回费，小数点后第三位的 5 标记，代表了该数据费用是自定义的。注意这和 -0.005 代表全部卖出并不冲突，其原因是自定义费用，
+    前边肯定不全为 0。第三位 5 之后，代表了 1% 位。也即 -51.28515 意义是赎回 51.28 份，赎回费为 1.5%. 200.205 代表申购 200.2 元，申购费为0
+    （因为标记位 5 后没有其他非零数字）。这种自定义通常可用于定期支付型基金的强制卖出（不收赎回费）和基金公司官网申购基金时申购费全免的记录。
+
     关于基金行为的设定，基金份额是四舍五入0 还是全部舍弃 1， 基金是默认现金分红 0 还是分红再投 2， 基金是赎回数目对应份额 0 还是金额 4 （只支持货币基金），
     将三个选项加起来得到 0-7 的数字，代表了基金的交易性质，默认全部为0。该性质即可以记录在 matrix 形式记账单紧贴基金代码行头的下一行，同时 record 读取时，
     ``record(path, fund_property=True)`` 设定 fund_property 参数, 或直接在记账单第二行日期栏写上 property 即可。每个基金代码对应一个 0 到 7 的数字。
@@ -30,7 +34,7 @@ class record:
 
     对于不同格式的记账单的例子，可在 github repo 中 tests 文件夹内的 demo*.csv 参考。
 
-    :param path: string for the csv file path
+    :param path: string for the csv file path or pd.DataFrame
     :param format: str. Default is "matrix". Can also be "list"。list 形式的账单更类似流水单。总共三列，每行由日期基金号和金额组成。
                 三栏标题分别为 date，fund 和 trade。其中日期的形式是 %Y/%m/%d. 该形式与默认的 matrix 不包含 "/" 不同。
     :param fund_property: bool. Default False. If True, 基金号下第一行的数字标记对应基金参数（暂时只支持 matrix 形式账单）。
@@ -41,14 +45,21 @@ class record:
     def __init__(
         self, path="input.csv", format="matrix", fund_property=False, **readkwds
     ):
-        df = pd.read_csv(path, **readkwds)
+        if isinstance(path, str):
+            df = pd.read_csv(path, **readkwds)
+        else:  # path itself is a pd.DataFrame
+            df = path
         if df.iloc[0]["date"] == "property":
             fund_property = True
         if format == "matrix":
             df.fillna(0, inplace=True)
+            df.columns = ["date"] + [
+                c.zfill(6) if c.isdigit() else c for c in df.columns[1:]
+            ]
             if fund_property:
                 self.property = df.iloc[0]
                 df2 = df.iloc[1:]
+                df2 = df2.sort_values(by="date", ascending=True)
                 df2.date = [
                     # pd.Timestamp.strptime(str(int(df.iloc[i].date)), "%Y%m%d")
                     # higher version of pandas timestamp doesn't support strptime anymore? why? what is the gain here?
@@ -57,6 +68,7 @@ class record:
                 ]
                 self.status = df2
             else:
+                df = df.sort_values(by="date", ascending=True)
                 df.date = [
                     pd.to_datetime(str(int(df.iloc[i].date)), format="%Y%m%d")
                     for i in range(len(df))
@@ -65,7 +77,8 @@ class record:
 
         elif format == "list":
             fund = df.fund.unique()
-            fund_s = ["{:06d}".format(i) for i in fund]
+            # fund_s = ["{:06d}".format(i) for i in fund]
+            fund_s = [str(c).zfill(6) if str(c).isdigit() else c for c in fund]
             date_s = df.date.unique()
             dfnew = pd.DataFrame(
                 columns=["date"] + fund_s, index=date_s, dtype="float64"
@@ -123,7 +136,10 @@ class irecord(record):
     """
 
     def __init__(self, path="input.csv", **readkwds):
-        df = pd.read_csv(path, **readkwds)
+        if isinstance(path, str):
+            df = pd.read_csv(path, **readkwds)
+        else:
+            df = path
         df.fillna(0, inplace=True)
         df.date = [
             pd.to_datetime(df.iloc[i].date, format="%Y%m%d") for i in range(len(df))
@@ -155,3 +171,5 @@ class irecord(record):
 
 Record = record
 IRecord = irecord
+
+# TODO: merge multiple status or istatus csv into one

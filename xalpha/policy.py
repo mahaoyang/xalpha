@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-modules for policy making: generate status table for backtesting
+modules for policy making: generate status table for simple backtesting
 """
 import pandas as pd
 
@@ -15,7 +15,7 @@ class policy(record):
     :param infoobj: info object as evidence for policy making
     :param start: string or object of date, the starting date for policy running
     :param end: string or object of date, the ending date for policy running
-    :param totmoney: float or int, characteristic money value, 
+    :param totmoney: float or int, characteristic money value,
         not necessary to be the total amount of money
     """
 
@@ -122,6 +122,65 @@ class scheduled_tune(scheduled):
             return 0
 
 
+class scheduled_window(scheduled):
+    """
+    在定投点前面设置一个滑动窗口，根据滑动窗口中的净值与当前净值进行比较，满足一定条件则进行定投。
+    通常用于跌了多投，跌越多投越多；涨了少投，涨越多投越少。
+    """
+
+    def __init__(
+        self, infoobj, totmoney, times, piece, window=7, window_dist=1, method="AVG"
+    ):
+        """
+        :param window: window width, means the total trading days in the window.
+        :param window_dist: the total trading days after window's end date and up to current date.
+            Sometimes we only use the data some days before, so we need window_dist to control the
+            distance between window and current date. eg. the window is [2021-01-04, 2021-01-05, 2021-01-06],
+            current date is 2021-01-07. In this example, the window width is 3, because there are three
+            trading days in this window, the window dist for current date is 1, because there is only
+            one trading date after 2021-01-06 and up to 2021-01-07.
+        :param piece: list of tuples, eg.[(-3,2),(0,1),(3,0.5)]. In this example, it means if the
+            fund netvalue rise in the range of (-100%, -3%], we will buy 2*totmoney,
+            if the fund netvalue rise in the range of (-3%, 0%], we will buy 1*totmoney,
+            if the fund netvalue rise in the range of (0%, 3%], we will buy 0.5*totmoney,
+            if the fund netvalue rise in the range of (3%, +infinity), then no purchase happen at all.
+        :param method: MAX, MIN, AVG, default value is AVG. It means how we process the data in the window.
+        """
+        self.window = window
+        self.window_dist = window_dist
+        self.piece = piece
+        self.method = method
+        assert self.method in ["MAX", "MIN", "AVG"]
+        assert self.window >= 1
+        assert self.window_dist >= 1
+        super().__init__(infoobj, totmoney, times)
+
+    def status_gen(self, date):
+        # skip the date in the first window
+        if date in self.times[0 : self.window + self.window_dist - 1]:
+            return 0
+        if date in self.times:
+            price_range = self.price[self.price["date"] < date]
+            if len(price_range) < self.window + self.window_dist - 1:
+                return 0
+            value = self.price[self.price["date"] >= date].iloc[0].netvalue
+            window_values = [
+                price_range.iloc[-1 * i].netvalue
+                for i in range(self.window_dist, self.window + self.window_dist)
+            ]
+            if self.method == "MAX":
+                base_value = max(window_values)
+            elif self.method == "MIN":
+                base_value = min(window_values)
+            else:
+                base_value = sum(window_values) / len(window_values)
+            for term in self.piece:
+                if (value - base_value) / base_value * 100 <= term[0]:
+                    return term[1] * self.totmoney
+            return 0
+        return 0
+
+
 class grid(policy):
     """
     网格投资类，用于指导网格投资策略的生成和模拟。这一简单的网格，买入仓位基于均分总金额，每次的卖出仓位基于均分总份额。
@@ -195,8 +254,8 @@ class indicator_cross(policy):
     制定两个任意技术指标之间（或和净值之间）交叉时买入卖出的策略。若收盘时恰好交叉，不操作，等第二日趋势确认。
 
     :param info: info object, trading aim of the policy
-    :param col: a tuple with two strings, eg ('netvalue','MA10'), when the left one is over the 
-        right one, we buy and otherwise we sell, that is the core of cross policy, you can choose 
+    :param col: a tuple with two strings, eg ('netvalue','MA10'), when the left one is over the
+        right one, we buy and otherwise we sell, that is the core of cross policy, you can choose
         any two columns as you like, as long as you generate them on the info object before input
         也即左栏数据从下向上穿过右栏数据时，买入；反之亦然
     :param start: date str of policy starting

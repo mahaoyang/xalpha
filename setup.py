@@ -2,7 +2,7 @@ import setuptools
 import os
 import shutil
 
-with open("README.md", "r") as fh:
+with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 ## super ugly but quick way to exclude .py files in the packages
@@ -16,7 +16,7 @@ for f in excludes:
 
 setuptools.setup(
     name="xalpha",
-    version="0.8.6",
+    version="0.11.4",
     author="refraction-ray",
     author_email="refraction-ray@protonmail.com",
     description="all about fund investment",
@@ -33,7 +33,7 @@ setuptools.setup(
         "scipy",
         "matplotlib",
         "requests",
-        "pyecharts>=1.7.0",  # broken api between 0.x and 1.x
+        "pyecharts==1.7.1",  # broken api between 0.x and 1.x
         "beautifulsoup4>=4.9.0",
         "sqlalchemy",
         "pysocks",  # sock5 proxy support

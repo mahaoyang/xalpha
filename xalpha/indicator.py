@@ -8,7 +8,7 @@ from pyecharts import options as opts
 from pyecharts.charts import Kline, Line, Bar, Grid
 from pyecharts.commons.utils import JsCode
 
-from xalpha.cons import line_opts, opendate, yesterdayobj
+from xalpha.cons import line_opts, opendate, yesterdayobj, sqrt_days_in_year
 
 
 def _upcount(ls):
@@ -66,7 +66,7 @@ class indicator:
         """
         generate price table for mulfix class, the cinfo class has this attr by default
         """
-        if getattr(self, "price", None) is None:
+        if getattr(self, "price", None) is None:  # 基金组合类，而非基金信息类
             times = pd.date_range(self.totcftable.iloc[0].date, yesterdayobj())
             netvalue = []
             for date in times:
@@ -98,6 +98,7 @@ class indicator:
             4,
         )
 
+    @staticmethod
     def annualized_returns(price, start, date=yesterdayobj()):
         """
         :param price: price table of info().price
@@ -116,6 +117,34 @@ class indicator:
 
     def benchmark_annualized_returns(self, date=yesterdayobj()):
         return indicator.annualized_returns(self.bmprice, self.start, date)
+
+    def pct_chg(self, freq="Y", benchmark=True):
+        """
+        年度，月，周涨幅统计
+
+        :param freq: str, default Y, could be M or W or anything pd.date_range accepts
+        :return: pd.DataFrame with columns date and pct_chg
+        """
+        if getattr(self, "bmprice", None) is None:
+            benchmark = False
+
+        ydf = pd.merge_asof(
+            pd.DataFrame(
+                pd.date_range(
+                    self.price["date"].iloc[0], self.price["date"].iloc[-1], freq=freq
+                ),
+                columns=["date"],
+            ),
+            self.price,
+        )
+        ydf["pct_chg"] = ydf["netvalue"].pct_change()
+        if benchmark:
+            ydf = pd.merge_asof(ydf, self.bmprice, on="date", suffixes=["", "_bc"])
+            ydf["pct_chg_benchmark"] = ydf["netvalue_bc"].pct_change()
+            ydf["pct_chg_difference"] = ydf["pct_chg"] - ydf["pct_chg_benchmark"]
+            return ydf[["date", "pct_chg", "pct_chg_benchmark", "pct_chg_difference"]]
+
+        return ydf[["date", "pct_chg"]]
 
     def beta(self, date=yesterdayobj()):
         bcmk = indicator.ratedaily(self.bmprice, date)
@@ -145,17 +174,20 @@ class indicator:
             (res.loc["bcmk", "bcmk"] ** 0.5) * res.loc["bt", "bt"] ** 0.5
         )
 
+    @staticmethod
     def ratedaily(price, date=yesterdayobj()):
         partp = price[price["date"] <= date]
-        return [
-            (partp.iloc[i + 1].netvalue - partp.iloc[i].netvalue)
-            / partp.iloc[i].netvalue
-            for i in range(len(partp) - 1)
-        ]
+        return list(partp["netvalue"].pct_change())[1:]
+        # return [
+        #     (partp.iloc[i + 1].netvalue - partp.iloc[i].netvalue)
+        #     / partp.iloc[i].netvalue
+        #     for i in range(len(partp) - 1)
+        # ]
 
+    @staticmethod
     def volatility(price, date=yesterdayobj()):
         df = pd.DataFrame(data={"rate": indicator.ratedaily(price, date)})
-        return df.std().rate * 15.8144
+        return df.std().rate * sqrt_days_in_year
 
     def algorithm_volatility(self, date=yesterdayobj()):
         return indicator.volatility(self.price, date)
@@ -175,7 +207,7 @@ class indicator:
         diff = [vp[i] - vm[i] for i in range(len(vm))]
         df = pd.DataFrame(data={"rate": diff})
         var = df.std().rate
-        var = var * 15.8144
+        var = var * sqrt_days_in_year
         return (rp - rm) / var
 
     def max_drawdown(self, date=yesterdayobj()):
@@ -491,27 +523,55 @@ class indicator:
             return line
 
 
-def plot_kline(df, rendered=True, col=""):
+def plot_kline(
+    df,
+    rendered=True,
+    ucolor="#ef232a",
+    dcolor="#14b143",
+    ucolorborder=None,
+    dcolorborder=None,
+    ucolorvolume=None,
+    dcolorvolume=None,
+    col="",
+):
     """
     针对 dataframe 直接画出标准看盘软件的上k线图下成交量图的形式
 
     :param df:
     :param rendered:
+    :param ucolor: str for color when going up, default red in A stock as "#ef232a"
+    :param dcolor: str for color when going down, default green in A stock as "#14b143"
     :param col:
     :return:
     """
+    # TODO: color changing seems to make no effect, possible issue with pyecharts
+    if ucolorborder is None:
+        ucolorborder = ucolor
+    if dcolorborder is None:
+        dcolorborder = dcolor
+    if ucolorvolume is None:
+        if ucolor != "#ffffff":
+            ucolorvolume = ucolor
+        else:
+            ucolorvolume = ucolorborder
+    if dcolorvolume is None:
+        if dcolor != "#ffffff":
+            dcolorvolume = dcolor
+        else:
+            dcolorvolume = dcolorborder
+
     kline = (
         Kline()
         .add_xaxis(xaxis_data=list(df["date"]))
         .add_yaxis(
             series_name="",
             itemstyle_opts=opts.ItemStyleOpts(
-                color="#ef232a",
-                color0="#14b143",
-                border_color="#ef232a",
-                border_color0="#14b143",
+                color=ucolor,
+                color0=dcolor,
+                border_color=ucolorborder,  # ucolor,
+                border_color0=dcolorborder,  # dcolor,
             ),
-            y_axis=list(zip(df["open"], df["close"], df["high"], df["low"])),
+            y_axis=list(zip(df["open"], df["close"], df["low"], df["high"])),
             markpoint_opts=opts.MarkPointOpts(
                 data=[
                     opts.MarkPointItem(type_="max", name="最大值"),
@@ -547,22 +607,25 @@ def plot_kline(df, rendered=True, col=""):
             ),
         )
     )
-    if col:
-        line = (
-            Line()
-            .add_xaxis(xaxis_data=list(df["date"]))
-            .add_yaxis(
-                series_name="",
-                y_axis=list(df[col]),
-                is_smooth=True,
-                linestyle_opts=opts.LineStyleOpts(opacity=0.5),
-                label_opts=opts.LabelOpts(is_show=False),
+    if col is not None:
+        for c in col:
+            line = (
+                Line()
+                .add_xaxis(xaxis_data=list(df["date"]))
+                .add_yaxis(
+                    series_name=c,
+                    y_axis=list(df[c]),
+                    is_smooth=True,
+                    linestyle_opts=opts.LineStyleOpts(opacity=0.5),
+                    label_opts=opts.LabelOpts(is_show=False),
+                )
             )
-        )
-        kline = kline.overlap(line)
+            kline = kline.overlap(line)
 
     if "volume" in df.columns:
         vl = list(df["volume"])
+    elif "amount" in df.columns:
+        vl = list(df["amount"])
     else:
         vl = [0 for _ in range(len(df))]
     bar = (
@@ -576,18 +639,19 @@ def plot_kline(df, rendered=True, col=""):
             itemstyle_opts=opts.ItemStyleOpts(
                 color=JsCode(
                     """
-                function(params) {
+                function(params) {{
                     var colorList;
-                    console.log(params);
-                    if (barData[params.dataIndex]>0) {
-                        colorList = '#ef232a';
-                    } else {
-                        colorList = '#14b143';
-                    }
+                    if (barData[params.dataIndex]>0) {{
+                        colorList = '{ucolor}';
+                    }} else {{
+                        colorList = '{dcolor}';
+                    }}
                     return colorList;
-                }
-                """
-                )
+                }}
+                """.format(
+                        ucolor=ucolorvolume, dcolor=dcolorvolume
+                    )
+                )  # escape {} when using format
             ),
         )
         .set_global_opts(

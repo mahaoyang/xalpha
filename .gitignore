@@ -1,5 +1,6 @@
 htmlcov/
 holdings.py
+investinghooks.py
 tests/SH000807.csv
 *auth.txt
 pytest*.csv
@@ -17,6 +18,8 @@ demo.ipynb
 demo*.html
 .ipynb_checkpoints/
 build/
+tests/AB.csv
 dist/
 xalpha.egg-info/
 .coverage
+.vscode/

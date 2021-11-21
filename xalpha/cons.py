@@ -21,44 +21,65 @@ from pyecharts.options import (
     TooltipOpts,
     VisualMapOpts,
 )
+from numpy import sqrt
 from scipy import optimize
 
 from xalpha import __path__
+from .exceptions import HttpStatusError
 
 logger = logging.getLogger(__name__)
 
 # date obj of today
-today = lambda: dt.datetime.combine(dt.date.today(), dt.time.min)
+# today = lambda: dt.datetime.combine(dt.date.today(), dt.time.min)
 
 tz_bj = dt.timezone(dt.timedelta(hours=8))
 
 
 def today_obj():
+    """
+    today obj in beijing timezone with no tzinfo
+
+    :return: datetime.datetime
+    """
     now = dt.datetime.now(tz=tz_bj)
     return now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
 
 
+# datetime obj for yesterdate date with time set to be 0:0:0
+yesterdayobj = lambda: (dt.datetime.now(tz_bj).replace(tzinfo=None) - dt.timedelta(1))
+
 # string for yesterday, only used for indexinfo url
-yesterday = lambda: dt.datetime.strftime(
-    (dt.datetime.now() - dt.timedelta(1)), "%Y%m%d"
-)
+yesterday = lambda: dt.datetime.strftime(yesterdayobj(), "%Y%m%d")
 
 # string for yesterday with dash
-yesterdaydash = lambda: dt.datetime.strftime(
-    (dt.datetime.now() - dt.timedelta(1)), "%Y-%m-%d"
-)
+yesterdaydash = lambda: dt.datetime.strftime(yesterdayobj(), "%Y-%m-%d")
 
-# datetime obj for yesterdate date with time set to be 0:0:0
-yesterdayobj = lambda: dt.datetime.strptime(yesterdaydash(), "%Y-%m-%d")
 
 # list: all the trade date of domestic stock market in the form of string
 caldate = pd.read_csv(os.path.join(__path__[0], "caldate.csv"))
 opendate = list(caldate[caldate["is_open"] == 1]["cal_date"])
-# directly use the tushare API instead of import tushare package for simplicity
 # opendate = list(ts.trade_cal()[ts.trade_cal()['isOpen']==1]['calendarDate'])
+opendate_set = set(opendate)  # for speed checking?
 
 # fund code list which always round down for the purchase share approximation
-droplist = ["003318", "000311"]
+droplist = ["003318", "000311", "000601", "009989"]
+
+sqrt_days_in_year = sqrt(250.0)
+
+
+def calendar_selfcheck():
+    # 国内链接 githubusercontent.com 大概率存在问题，因此设计成联网自动更新日历大概率无用。
+    # 也许之后考虑一些较稳定的第三方资源托管服务
+    current_year = dt.datetime.now().year
+    if str(current_year) != opendate[-1][:4]:
+        logger.warning(
+            "Please update xalpha via `pip install -U xalpha` to keep the trade calendar up-to-date"
+        )
+        print("请更新 xalpha 版本以更新最新年份的 A 股交易日历, 否则将可能无法正确获取和处理最新的基金净值")
+
+
+calendar_selfcheck()
+
 
 region_trans = {
     "瑞士": "CH",
@@ -92,6 +113,15 @@ holidays = {
         "2020-12-25",
         "2020-12-28",
         "2020-12-31",
+        "2021-01-01",
+        "2021-01-26",
+        "2021-04-02",
+        "2021-04-05",
+        "2021-06-14",
+        "2021-12-24",
+        "2021-12-27",
+        "2021-12-28",
+        "2021-12-31",
     ],
     "CH": [
         "2020-01-01",
@@ -104,6 +134,13 @@ holidays = {
         "2020-12-24",
         "2020-12-25",
         "2020-12-31",
+        "2021-01-01",
+        "2021-04-02",
+        "2021-04-05",
+        "2021-05-13",
+        "2021-05-24",
+        "2021-12-24",
+        "2021-12-31",
     ],
     "CN": [
         "2020-01-01",
@@ -125,6 +162,24 @@ holidays = {
         "2020-10-06",
         "2020-10-07",
         "2020-10-08",
+        "2021-01-01",
+        "2021-02-11",
+        "2021-02-12",
+        "2021-02-15",
+        "2021-02-16",
+        "2021-02-17",
+        "2021-04-05",
+        "2021-05-03",
+        "2021-05-04",
+        "2021-05-05",
+        "2021-06-14",
+        "2021-09-20",
+        "2021-09-21",
+        "2021-10-01",
+        "2021-10-04",
+        "2021-10-05",
+        "2021-10-06",
+        "2021-10-07",
     ],
     "DE": [
         "2020-01-01",
@@ -135,6 +190,12 @@ holidays = {
         "2020-12-24",
         "2020-12-25",
         "2020-12-31",
+        "2021-01-01",
+        "2021-04-02",
+        "2021-04-05",
+        "2021-05-24",
+        "2021-12-24",
+        "2021-12-31",
     ],
     "FR": [
         "2020-01-01",
@@ -144,6 +205,11 @@ holidays = {
         "2020-12-24",
         "2020-12-25",
         "2020-12-31",
+        "2021-01-01",
+        "2021-04-02",
+        "2021-04-05",
+        "2021-12-24",
+        "2021-12-31",
     ],
     "HK": [
         "2020-01-01",
@@ -159,6 +225,22 @@ holidays = {
         "2020-10-02",
         "2020-10-26",
         "2020-12-25",
+        "2021-01-01",
+        "2021-02-11",
+        "2021-02-12",
+        "2021-02-15",
+        "2021-04-02",
+        "2021-04-05",
+        "2021-04-06",
+        "2021-05-19",
+        "2021-06-14",
+        "2021-07-01",
+        "2021-09-22",
+        "2021-10-01",
+        "2021-10-14",
+        "2021-12-24",
+        "2021-12-27",
+        "2021-12-31",
     ],
     "IN": [
         "2020-02-21",
@@ -173,6 +255,19 @@ holidays = {
         "2020-11-16",
         "2020-11-30",
         "2020-12-25",
+        "2021-01-26",
+        "2021-03-11",
+        "2021-03-29",
+        "2021-04-02",
+        "2021-04-14",
+        "2021-04-21",
+        "2021-05-13",
+        "2021-07-20",
+        "2021-08-19",
+        "2021-09-10",
+        "2021-10-15",
+        "2021-11-04",
+        "2021-11-19",
     ],
     "JP": [
         "2020-01-01",
@@ -194,6 +289,22 @@ holidays = {
         "2020-11-03",
         "2020-11-23",
         "2020-12-31",
+        "2021-01-01",
+        "2021-01-11",
+        "2021-02-11",
+        "2021-02-23",
+        "2021-04-29",
+        "2021-05-03",
+        "2021-05-04",
+        "2021-05-05",
+        "2021-07-22",
+        "2021-07-23",
+        "2021-08-09",
+        "2021-09-20",
+        "2021-09-23",
+        "2021-11-03",
+        "2021-11-23",
+        "2021-12-31",
     ],
     "KR": [
         "2020-01-01",
@@ -208,6 +319,16 @@ holidays = {
         "2020-10-09",
         "2020-12-25",
         "2020-12-31",
+        "2021-01-01",
+        "2021-02-11",
+        "2021-02-12",
+        "2021-03-01",
+        "2021-05-05",
+        "2021-05-19",
+        "2021-09-20",
+        "2021-09-21",
+        "2021-09-22",
+        "2021-12-31",
     ],
     "SG": [
         "2020-01-01",
@@ -221,6 +342,17 @@ holidays = {
         "2020-12-24",
         "2020-12-25",
         "2020-12-31",
+        "2021-01-01",
+        "2021-02-11",
+        "2021-02-12",
+        "2021-04-02",
+        "2021-05-13",
+        "2021-05-26",
+        "2021-07-20",
+        "2021-08-09",
+        "2021-11-04",
+        "2021-12-24",
+        "2021-12-31",
     ],
     "TW": [
         "2020-01-01",
@@ -240,6 +372,23 @@ holidays = {
         "2020-10-01",
         "2020-10-02",
         "2020-10-09",
+        "2021-01-01",
+        "2021-02-08",
+        "2021-02-09",
+        "2021-02-10",
+        "2021-02-11",
+        "2021-02-12",
+        "2021-02-15",
+        "2021-02-16",
+        "2021-03-01",
+        "2021-04-02",
+        "2021-04-05",
+        "2021-04-30",
+        "2021-06-14",
+        "2021-09-20",
+        "2021-09-21",
+        "2021-10-11",
+        "2021-12-31",
     ],
     "UK": [
         "2020-01-01",
@@ -253,6 +402,17 @@ holidays = {
         "2020-12-28",
         "2020-12-31",
         "2021-01-01",
+        "2021-01-01",
+        "2021-04-02",
+        "2021-04-05",
+        "2021-05-03",
+        "2021-05-31",
+        "2021-08-30",
+        "2021-12-24",
+        "2021-12-27",
+        "2021-12-28",
+        "2021-12-31",
+        "2022-01-03",
     ],
     "US": [
         "2020-01-01",
@@ -269,10 +429,23 @@ holidays = {
         "2020-12-24",
         "2020-12-25",
         "2021-01-01",
+        "2021-01-01",
+        "2021-01-18",
+        "2021-02-15",
+        "2021-03-14",
+        "2021-04-02",
+        "2021-05-31",
+        "2021-07-05",
+        "2021-09-06",
+        "2021-11-07",
+        "2021-11-25",
+        "2021-11-26",
+        "2021-12-24",
     ],
 }
 
 connection_errors = (
+    HttpStatusError,
     ConnectionResetError,
     requests.exceptions.RequestException,
     requests.exceptions.ConnectionError,
@@ -302,10 +475,10 @@ heatmap_opts = {
     )
 }
 
-pie_opts = {
-    "tooltip_opts": TooltipOpts(),
-    "legend_opts": LegendOpts(orient="vertical", pos_left="left"),
-}
+# pie_opts = {
+#     "tooltip_opts": TooltipOpts(),
+#     "legend_opts": LegendOpts(orient="vertical", pos_left="left"),
+# }
 
 themeriver_opts = {
     "xaxis_opts": AxisOpts(type_="time"),
@@ -378,18 +551,51 @@ def convert_date(date):
         return date
 
 
+def _date_check(dtobj, check=False):
+    if not isinstance(dtobj, dt.datetime):
+        dtobj = dt.datetime.strptime(dtobj.replace("/", "").replace("-", ""), "%Y%m%d")
+    if check and (dtobj.year > dt.datetime.now().year or dtobj.year < 1991):
+        raise ValueError(
+            "date goes beyond market range: %s" % dtobj.strftime("%Y-%m-%d")
+        )
+    return dtobj
+
+
 def next_onday(dtobj):
+    dtobj = _date_check(dtobj, check=True)
     dtobj += dt.timedelta(1)
-    while dtobj.strftime("%Y-%m-%d") not in opendate:
+    while dtobj.strftime("%Y-%m-%d") not in opendate_set:
         dtobj += dt.timedelta(1)
     return dtobj
 
 
 def last_onday(dtobj):
+    dtobj = _date_check(dtobj, check=True)
     dtobj -= dt.timedelta(1)
-    while dtobj.strftime("%Y-%m-%d") not in opendate:
+    while dtobj.strftime("%Y-%m-%d") not in opendate_set:
         dtobj -= dt.timedelta(1)
     return dtobj
+
+
+def avail_dates(dtlist, future=False):
+    """
+    make every day in the list the next open day
+
+    :param dtlist: datetime obj list
+    :param future: bool, default False, indicating the latest day in the list is yesterday
+    :return: datetime obj list
+    """
+    ndtlist = []
+    for d in dtlist:
+        if d.strftime("%Y-%m-%d") not in opendate_set:
+            nd = next_onday(d)
+        else:
+            nd = d
+        if future is False:
+            if (nd - yesterdayobj()).days > 0:
+                continue
+        ndtlist.append(nd)
+    return ndtlist
 
 
 def scale_dict(d, scale=1, ulimit=100, dlimit=50, aim=None):
@@ -415,13 +621,20 @@ def _float(n):
         elif n.endswith("G") or n.endswith("g") or n.endswith("B") or n.endswith("b"):
             n = float(n[:-1]) * 1000 * 1000 * 1000
         elif n == "-":
+            logger.info("_float met -, taken as 0")
             return 0
+        elif n.endswith("%"):
+            logger.info("_float met with %% as %s" % n)
+            return float(n[:-1]) / 100
     except AttributeError:
         pass
+    if not n:
+        logger.info("_float met with None as input arguments")
+        return 0.0
     return float(n)
 
 
-def reconnect(tries=5, timeout=16):
+def reconnect(tries=5, timeout=12):
     def robustify(f):
         @wraps(f)
         def wrapper(*args, **kws):
@@ -448,6 +661,10 @@ def reconnect(tries=5, timeout=16):
                         % (url, inspect.stack()[1].function)
                     )
                     r = f(*args, **kws)
+                    if (
+                        getattr(r, "status_code", 200) != 200
+                    ):  # in case r is a json dict
+                        raise HttpStatusError
                     return r
                 except connection_errors as e:
                     logger.warning("Fails at fetching url: %s. Try again." % url)
@@ -552,6 +769,6 @@ holdings["501018"] = {
     "etfs/united-states-oil-fund": 9.63,
 }
 holdings["501018rt"] = {
-    "commodities/brent-oil": 40 * 0.9,
-    "commodities/crude-oil": 60 * 0.9,
+    "commodities/brent-oil": {"weight": 49, "time": -1},
+    "commodities/crude-oil": {"weight": 45, "time": 4},
 }

@@ -8,7 +8,7 @@ xa.set_backend(backend="memory", prefix="pytest-")
 
 
 def test_compare():
-    c = xa.Compare(("37450", "USD"), "SH501018", start="20200101")
+    c = xa.Compare(("FT-JBGOUA:SWX:USD", "USD"), "SH501018", start="20200101")
     c.corr()
     c.v()
 
@@ -16,6 +16,10 @@ def test_compare():
 def test_stock_peb():
     h = xa.StockPEBHistory("HK00700")
     h.summary()
+
+
+def test_overpriced():
+    xa.OverPriced("SZ161815", prev=360).v([-1.5, 3.5])
 
 
 @pytest.mark.local
@@ -38,7 +42,10 @@ def test_qdii_predict():
     hb = xa.QDIIPredict(
         "SZ162411",
         t1dict={".SPSIOP": 91},
-        t0dict={"commodities/brent-oil": 40 * 0.9, "commodities/crude-oil": 60 * 0.9,},
+        t0dict={
+            "commodities/brent-oil": 40 * 0.9,
+            "commodities/crude-oil": 60 * 0.9,
+        },
         positions=True,
     )
     hb.get_t1()
@@ -47,7 +54,8 @@ def test_qdii_predict():
     hb.analyse()
 
 
-@pytest.mark.local
+# @pytest.mark.local
+@pytest.mark.skip(reason="cninvesting server check")
 def test_qdii_predict_local():
     xc = xa.QDIIPredict("SZ165513", positions=True)
     xc.get_t0_rate()
@@ -56,3 +64,13 @@ def test_qdii_predict_local():
 def test_rt_predict():
     p = xa.RTPredict("SH512500", t0dict="SH000905")
     p.get_t0_rate()
+
+
+def test_cbcaculator():
+    c = xa.CBCalculator("SH113577")
+    d = c.analyse()
+    assert d["name"] == "春秋转债"
+    # obtain correct redeem_price from superscipt
+    c = xa.CBCalculator("SH113604")
+    d = c.analyse()
+    assert d["name"] == "多伦转债"

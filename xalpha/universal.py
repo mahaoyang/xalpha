@@ -38,7 +38,7 @@ except ImportError:
     except ImportError:
         pass
 
-from xalpha.info import basicinfo, fundinfo, mfundinfo
+from xalpha.info import basicinfo, fundinfo, mfundinfo, get_fund_holdings
 from xalpha.indicator import indicator
 from xalpha.cons import (
     rget,
@@ -46,8 +46,9 @@ from xalpha.cons import (
     rget_json,
     rpost_json,
     tz_bj,
-    today_obj,
+    last_onday,
     region_trans,
+    today_obj,
     _float,
 )
 from xalpha.provider import data_source
@@ -69,6 +70,39 @@ def has_weekday(start, end):
         if d.weekday() < 5:
             return True
     return False
+
+
+def ts2pdts(ts):
+    dto = dt.datetime.fromtimestamp(ts / 1000, tz=tz_bj).replace(tzinfo=None)
+    return dto.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )  # 雪球美股数据时间戳是美国0点，按北京时区换回时间后，把时分秒扔掉就重合了
+
+
+def decouple_code(code):
+    """
+    decompose SH600000.A into SH600000, after
+
+    :param code:
+    :return: Tuple
+    """
+    if len(code[1:].split(".")) > 1:  # .SPI in US stock!
+        type_ = code.split(".")[-1]
+        code = ".".join(code.split(".")[:-1])
+        if type_.startswith("b") or type_.startswith("B"):
+            type_ = "before"
+        elif type_.startswith("a") or type_.startswith("A"):
+            type_ = "after"
+        elif type_.startswith("n") or type_.startswith("N"):
+            type_ = "normal"
+        else:
+            logger.warning(
+                "unrecoginzed flag for adjusted factor %s, use default" % type_
+            )
+            type_ = "before"
+    else:
+        type_ = "before"
+    return code, type_
 
 
 def lru_cache_time(ttl=None, maxsize=None):
@@ -111,25 +145,45 @@ def get_token():
     return r.cookies["xq_a_token"]
 
 
-def ts2pdts(ts):
-    dto = dt.datetime.fromtimestamp(ts / 1000, tz=tz_bj).replace(tzinfo=None)
-    return dto.replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )  # 雪球美股数据时间戳是美国0点，按北京时区换回时间后，把时分秒扔掉就重合了
+def get_historical_fromxq(code, count, type_="before", full=False):
+    """
 
-
-def get_historical_fromxq(code, count, full=False):
-    url = "https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={code}&begin={tomorrow}&period=day&type=before&count=-{count}"
+    :param code:
+    :param count:
+    :param type_: str. normal, before, after
+    :param full:
+    :return:
+    """
+    url = "https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={code}&begin={tomorrow}&period=day&type={type_}&count=-{count}"
     if full:
         url += "&indicator=kline,pe,pb,ps,pcf,market_capital,agt,ggt,balance"
+    # pe 是 TTM 数据
     r = rget_json(
-        url.format(code=code, tomorrow=int(tomorrow_ts() * 1000), count=count),
+        url.format(
+            code=code, tomorrow=int(tomorrow_ts() * 1000), count=count, type_=type_
+        ),
         cookies={"xq_a_token": get_token()},
         headers={"user-agent": "Mozilla/5.0"},
     )
     df = pd.DataFrame(data=r["data"]["item"], columns=r["data"]["column"])
     df["date"] = (df["timestamp"]).apply(ts2pdts)  # reset hours to zero
     return df
+
+
+@lru_cache()
+def get_industry_fromxq(code):
+    """
+    part of symbols has empty industry information
+
+    :param code:
+    :return: dict
+    """
+    url = (
+        "https://xueqiu.com/stock/industry/stockList.json?code=%s&type=1&size=100"
+        % code
+    )
+    r = rget_json(url, cookies={"xq_a_token": get_token()})
+    return r
 
 
 def get_historical_fromcninvesting(curr_id, st_date, end_date, app=False):
@@ -256,7 +310,10 @@ def get_investing_id(suburl, app=False):
             "Host": "cn.investing.com",
             "X-Requested-With": "XMLHttpRequest",
         }
-    r = rget(url, headers=headers,)
+    r = rget(
+        url,
+        headers=headers,
+    )
     s = BeautifulSoup(r.text, "lxml")
     pid = s.find("span", id="last_last")["class"][-1].split("-")[1]
     return pid
@@ -379,14 +436,65 @@ def get_rmb(start=None, end=None, prev=360, currency="USD/CNY"):
 def get_fund(code):
     # 随意设置非空 path，防止嵌套缓存到 fundinfo
     if code[0] == "F":
-        df = fundinfo(code[1:], path="nobackend", priceonly=True).price
+        if code.startswith("F96"):
+            return get_historical_from_ttjj_oversea(code)
+        else:
+            df = fundinfo(code[1:], path="nobackend", priceonly=True).price
     elif code[0] == "T":
         df = fundinfo(code[1:], path="nobackend", priceonly=True).price
         df["netvalue"] = df["totvalue"]
     elif code[0] == "M":
         df = mfundinfo(code[1:], path="nobackend").price
+    else:
+        raise ParserFailure("Unknown fund code %s" % code)
     df["close"] = df["netvalue"]
     return df[["date", "close"]]
+
+
+def get_historical_from_ttjj_oversea(code, start=None, end=None):
+    if code.startswith("F"):
+        code = code[1:]
+    pagesize = (
+        dt.datetime.strptime(end, "%Y%m%d") - dt.datetime.strptime(start, "%Y%m%d")
+    ).days + 1
+    r = rget_json(
+        "http://overseas.1234567.com.cn/overseasapi/OpenApiHander.ashx?api=HKFDApi&m=MethodJZ&hkfcode={hkfcode}&action=2&pageindex=0&pagesize={pagesize}&date1={startdash}&date2={enddash}&callback=".format(
+            hkfcode=get_hkfcode(code),
+            pagesize=pagesize,
+            startdash=start[:4] + "-" + start[4:6] + "-" + start[6:],
+            enddash=end[:4] + "-" + end[4:6] + "-" + end[6:],
+        )
+    )
+    datalist = {"date": [], "close": []}
+    for dd in r["Data"]:
+        datalist["date"].append(pd.to_datetime(dd["PDATE"]))
+        datalist["close"].append(dd["NAV"])
+    df = pd.DataFrame(datalist)
+    df = df[df["date"] <= end]
+    df = df[df["date"] >= start]
+    df = df.sort_values("date", ascending=True)
+    return df
+
+
+def get_portfolio_fromttjj(code, start=None, end=None):
+    startobj = dt.datetime.strptime(start, "%Y%m%d")
+    endobj = dt.datetime.strptime(end, "%Y%m%d")
+    if (endobj - startobj).days < 90:
+        return None  # note start is always 1.1 4.1 7.1 10.1 in incremental updates
+    if code.startswith("F"):
+        code = code[1:]
+    r = rget("http://fundf10.eastmoney.com/zcpz_{code}.html".format(code=code))
+    s = BeautifulSoup(r.text, "lxml")
+    table = s.find("table", class_="tzxq")
+    df = pd.read_html(str(table))[0]
+    df["date"] = pd.to_datetime(df["报告期"])
+    df["stock_ratio"] = df["股票占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
+    df["bond_ratio"] = df["债券占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
+    df["cash_ratio"] = df["现金占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
+    #     df["dr_ratio"] = df["存托凭证占净比"].replace("---", "0%").apply(lambda s: xa.cons._float(s[:-1]))
+    df["assets"] = df["净资产（亿元）"]
+    df = df[::-1]
+    return df[["date", "stock_ratio", "bond_ratio", "cash_ratio", "assets"]]
 
 
 # this is the most elegant approach to dispatch get_daily, the definition can be such simple
@@ -403,6 +511,38 @@ def get_fundshare_byjq(code, **kws):
     )
     df["date"] = pd.to_datetime(df["date"])
     df = df[["date", "shares"]]
+    return df
+
+
+@lru_cache(maxsize=1024)
+def get_futu_id(code):
+    r = rget("https://www.futunn.com/stock/{code}".format(code=code))
+    sind = r.text.find("securityId")
+    futuid = r.text[sind : sind + 30].split("=")[1].split(";")[0].strip(" ").strip("'")
+    sind = r.text.find("marketType")
+    market = r.text[sind : sind + 30].split("=")[1].split(";")[0].strip().strip("''")
+    return futuid, market
+
+
+def get_futu_historical(code, start=None, end=None):
+    fid, market = get_futu_id(code)
+    r = rget(
+        "https://www.futunn.com/new-quote/kline?security_id={fid}&type=2&market_type={market}".format(
+            fid=fid, market=market
+        )
+    )
+    df = pd.DataFrame(r.json()["data"]["list"])
+    df["date"] = df["k"].map(
+        lambda s: dt.datetime.fromtimestamp(s)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .replace(tzinfo=None)
+    )
+    df["open"] = df["o"] / 1000
+    df["close"] = df["c"] / 1000
+    df["high"] = df["h"] / 1000
+    df["low"] = df["l"] / 1000
+    df["volume"] = df["v"]
+    df = df.drop(["k", "t", "o", "c", "h", "l", "v"], axis=1)
     return df
 
 
@@ -425,8 +565,7 @@ def get_historical_fromsp(code, start=None, end=None, region="us", **kws):
     else:
         col = "1"
     start_obj = dt.datetime.strptime(start, "%Y%m%d")
-    today_obj = dt.datetime.now()
-    fromnow = (today_obj - start_obj).days
+    fromnow = (today_obj() - start_obj).days
     if fromnow < 300:
         flag = "one"
     elif fromnow < 1000:
@@ -443,13 +582,15 @@ selectedModule=PerformanceGraphView&selectedSubModule=Graph\
         headers={
             "sec-fetch-dest": "document",
             "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "none",
+            "sec-fetch-site": "same-origin",
             "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
         },
     )
-    df = pd.read_excel(r.content)
+    df = pd.read_excel(r.content, engine="xlrd")
     # print(df.iloc[:10])
     df = df.iloc[6:]
+    df = df.dropna()
     df["close"] = df["Unnamed: " + col]
     df["date"] = pd.to_datetime(df["Unnamed: 0"])
     df = df[["date", "close"]]
@@ -471,8 +612,7 @@ def get_historical_frombb(code, start=None, end=None, **kws):
         code = code[3:]
     # end_obj = dt.datetime.strptime(end, "%Y%m%d")
     start_obj = dt.datetime.strptime(start, "%Y%m%d")
-    today_obj = dt.datetime.now()
-    fromnow = (today_obj - start_obj).days
+    fromnow = (today_obj() - start_obj).days
     if fromnow < 20:
         years = "1_MONTH"
     elif fromnow < 300:
@@ -543,7 +683,7 @@ get-historical-prices?startDate={start}&endDate={end}&symbol={code}".format(
 
 def get_historical_fromyh(code, start=None, end=None):
     """
-    雅虎财经数据源，支持数据丰富，不限于美股。但存在部分历史数据确实 NAN 或者周末进入交易日的现象，可能数据需要进一步清洗和处理。
+    雅虎财经数据源，支持数据丰富，不限于美股。但存在部分历史数据缺失 NAN 或者周末进入交易日的现象，可能数据需要进一步清洗和处理。
 
     :param code:
     :param start:
@@ -553,8 +693,7 @@ def get_historical_fromyh(code, start=None, end=None):
     if code.startswith("YH-"):
         code = code[3:]
     start_obj = dt.datetime.strptime(start, "%Y%m%d")
-    today_obj = dt.datetime.now()
-    fromnow = (today_obj - start_obj).days
+    fromnow = (today_obj() - start_obj).days
     if fromnow < 20:
         range_ = "1mo"
     elif fromnow < 50:
@@ -592,6 +731,230 @@ def get_historical_fromyh(code, start=None, end=None):
     return df
 
 
+def get_historical_fromzzindex(code, start, end=None):
+    """
+    中证指数源
+
+    :param code:
+    :param start:
+    :param end:
+    :return:
+    """
+    if code.startswith("ZZ"):
+        code = code[2:]
+    start_obj = dt.datetime.strptime(start, "%Y%m%d")
+    fromnow = (today_obj() - start_obj).days
+    if fromnow < 20:
+        flag = "1%E4%B8%AA%E6%9C%88"
+    elif fromnow < 60:
+        flag = "3%E4%B8%AA%E6%9C%88"  # 个月
+    elif fromnow < 200:
+        flag = "1%E5%B9%B4"  # 年
+    else:
+        flag = "5%E5%B9%B4"
+    r = rget_json(
+        "http://www.csindex.com.cn/zh-CN/indices/index-detail/\
+{code}?earnings_performance={flag}&data_type=json".format(
+            code=code, flag=flag
+        ),
+        headers={
+            "Host": "www.csindex.com.cn",
+            "Referer": "http://www.csindex.com.cn/zh-CN/indices/index-detail/{code}".format(
+                code=code
+            ),
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_4) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        },
+    )
+    df = pd.DataFrame(r)
+    df["date"] = pd.to_datetime(df["tradedate"])
+    df["close"] = df["tclose"].apply(_float)
+    return df[["date", "close"]]
+
+
+def get_historical_fromgzindex(code, start, end):
+    """
+    国证指数源
+
+    :param code:
+    :param start:
+    :param end:
+    :return:
+    """
+    if code.startswith("GZ"):
+        code = code[2:]
+    start = start[:4] + "-" + start[4:6] + "-" + start[6:]
+    end = end[:4] + "-" + end[4:6] + "-" + end[6:]
+    params = {
+        "indexCode": code,
+        "startDate": start,
+        "endDate": end,
+        "frequency": "Day",
+    }
+
+    r = rget_json(
+        "http://hq.cnindex.com.cn/market/market/getIndexDailyDataWithDataFormat",
+        params=params,
+    )
+    df = pd.DataFrame(r["data"]["data"], columns=r["data"]["item"])
+
+    df["date"] = pd.to_datetime(df["timestamp"])
+    df = df[["date", "close", "open", "low", "high", "percent", "amount", "volume"]]
+    # TODO: 是否有这些列不全的国证指数？
+    df = df[::-1]
+    return df
+
+
+def get_historical_fromhzindex(code, start, end):
+    """
+    华证指数源
+
+    :param code:
+    :param start:
+    :param end:
+    :return:
+    """
+    if code.startswith("HZ"):
+        code = code[2:]
+
+    r = rget_json(
+        "http://www.chindices.com/index/values.val?code={code}".format(code=code)
+    )
+    df = pd.DataFrame(r["data"])
+    df["date"] = pd.to_datetime(df["date"])
+    df = df[["date", "price", "pctChange"]]
+    df.rename(columns={"price": "close", "pctChange": "percent"}, inplace=True)
+    df = df[::-1]
+    return df
+
+
+def get_historical_fromesunny(code, start=None, end=None):
+    """
+    易盛商品指数
+
+    :param code: eg. ESCI000201
+    :param start: just placeholder
+    :param end: just placeholder
+    :return:
+    """
+    # code
+    if code.startswith("ESCI"):
+        code = code[4:] + ".ESCI"
+    r = rget(
+        "http://www.esunny.com.cn/chartES/csv/shareday/day_易盛指数_{code}.es".format(
+            code=code
+        )
+    )
+    data = []
+    for l in r.text.split("\n"):
+        row = [s.strip() for s in l.split("|")]  # 开 高 低 收 结
+        if len(row) > 1:
+            data.append(row[:7])
+    df = pd.DataFrame(
+        data, columns=["date", "open", "high", "low", "close", "settlement", "amount"]
+    )
+    df["date"] = pd.to_datetime(df["date"])
+    for c in ["open", "high", "low", "close", "settlement", "amount"]:
+        df[c] = df[c].apply(_float)
+    return df
+
+
+def get_historical_fromycharts(code, start, end, category, metric):
+    params = {
+        "securities": "include:true,id:{code},,".format(code=code),
+        "calcs": "include:true,id:{metric},,".format(metric=metric),
+        "startDate": start,  # %m/%d/%Y
+        "endDate": end,  # %m/%d/%Y
+        "zoom": "custom",
+    }
+    r = rget_json(
+        "https://ycharts.com/charts/fund_data.json",
+        params=params,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_4)\
+                AppleWebKit/537.36 (KHTML, like Gecko)",
+            "Host": "ycharts.com",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://ycharts.com/{category}/{code}/chart/".format(
+                category=category, code=code
+            ),
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    df = pd.DataFrame(
+        data=r["chart_data"][0][0]["raw_data"], columns=["timestamp", "close"]
+    )
+    df["date"] = (df["timestamp"]).apply(ts2pdts)
+    return df[["date", "close"]]
+
+
+@lru_cache()
+def get_bond_rates(rating, date=None):
+    """
+    获取各评级企业债的不同久期的预期利率
+
+    :param rating: str. eg AAA, AA-, N for 中国国债
+    :param date: %Y-%m-%d
+    :return:
+    """
+    rating = rating.strip()
+    rating_uid = {
+        "N": "2c9081e50a2f9606010a3068cae70001",  # 国债
+        "AAA": "2c9081e50a2f9606010a309f4af50111",
+        "AAA-": "8a8b2ca045e879bf014607ebef677f8e",
+        "AA+": "2c908188138b62cd01139a2ee6b51e25",
+        "AA": "2c90818812b319130112c279222836c3",
+        "AA-": "8a8b2ca045e879bf014607f9982c7fc0",
+        "A+": "2c9081e91b55cc84011be40946ca0925",
+        "A": "2c9081e91e6a3313011e6d438a58000d",
+        "A-": "8a8b2ca04142df6a014148ca880f3046",
+        "A": "2c9081e91e6a3313011e6d438a58000d",
+        "BBB+": "2c9081e91ea160e5011eab1f116c1a59",
+        "BBB": "8a8b2ca0455847ac0145650780ad68fb",
+        "BB": "8a8b2ca0455847ac0145650ba23b68ff",
+        "B": "8a8b2ca0455847ac0145650c3d726901",
+    }
+    # 上边字典不全，非常欢迎贡献 ：）
+    def _fetch(date):
+        r = rpost(
+            "https://yield.chinabond.com.cn/cbweb-mn/yc/searchYc?\
+xyzSelect=txy&&workTimes={date}&&dxbj=0&&qxll=0,&&yqqxN=N&&yqqxK=K&&\
+ycDefIds={uid}&&wrjxCBFlag=0&&locale=zh_CN".format(
+                uid=rating_uid.get(rating, rating), date=date
+            ),
+        )
+        return r
+
+    if not date:
+        date = dt.datetime.today().strftime("%Y-%m-%d")
+
+    r = _fetch(date)
+    while len(r.text.strip()) < 20:  # 当天没有数据，非交易日
+        date = last_onday(date).strftime("%Y-%m-%d")
+        r = _fetch(date)
+    l = r.json()[0]["seriesData"]
+    l = [t for t in l if t[1]]
+    df = pd.DataFrame(l, columns=["year", "rate"])
+    return df
+
+
+def get_bond_rates_range(rating, duration=3, freq="W-FRI", start=None, end=None):
+    l = []
+    if rating.startswith("B-"):
+        rating = rating[2:]
+    rs = rating.split(".")
+    if len(rs) > 1:
+        duration = float(rs[1])
+        rating = rs[0]
+
+    for d in pd.date_range(start, end, freq=freq):
+        df = get_bond_rates(rating, d.strftime("%Y-%m-%d"))
+        l.append([d, df[df["year"] <= duration].iloc[-1]["rate"]])
+    return pd.DataFrame(l, columns=["date", "close"])
+
+
 @data_source("jq")
 def get_macro(table, start, end, datecol="stat_year"):
     df = macro.run_query(
@@ -621,17 +984,17 @@ def _get_daily(
 ):
     """
     universal fetcher for daily historical data of literally everything has a value in market.
-    数据来源包括天天基金，雪球，英为财情，外汇局官网，聚宽，标普官网，bloomberg，雅虎财经等。
+    数据来源包括但不限于天天基金，雪球，英为财情，外汇局官网，聚宽，标普官网，bloomberg，雅虎财经，ycharts等。
 
     :param code: str.
 
-            1. 对于沪深市场的股票，指数，ETF，LOF 场内基金，可转债和债券，直接使用其代码，主要开头需要包括 SH 或者 SZ。
+            1. 对于沪深市场的股票，指数，ETF，LOF 场内基金，可转债和债券，直接使用其代码，主要开头需要包括 SH 或者 SZ。如果数字代码之后接 .A .B .N 分别代表后复权，前复权和不复权数据，不加后缀默认前复权。港股美股同理。
 
             2. 对于香港市场的股票，指数，使用其数字代码，同时开头要添加 HK。
 
             3. 对于美国市场的股票，指数，ETF 等，直接使用其字母缩写代码即可。
 
-            4. 对于人民币中间价数据，使用 "USD/CNY" 的形式，具体可能的值可在 http://www.chinamoney.com.cn/chinese/bkccpr/ 历史数据的横栏查询
+            4. 对于人民币中间价数据，使用 "USD/CNY" 的形式，具体可能的值可在 http://www.chinamoney.com.cn/chinese/bkccpr/ 历史数据的横栏查询，注意日元需要用 100JPY/CNY.
 
             5. 对于所有可以在 cn.investing.com 网站查到的金融产品，其代码可以是该网站对应的统一代码，或者是网址部分，比如 DAX 30 的概览页面为 https://cn.investing.com/indices/germany-30，那么对应代码即为 "indices/germany-30"。也可去网页 inspect 手动查找其内部代码（一般不需要自己做，推荐直接使用网页url作为 code 变量值），手动 inspect 加粗的实时价格，其对应的网页 span class 中的 pid 的数值即为内部代码。
 
@@ -657,17 +1020,35 @@ def _get_daily(
 
             16. 形如 FT-22065529 格式的数据或 FT-INX:IOM，可以返回 financial times 的数据，推荐直接用后者。前者数字代码来源，打开浏览器 network 监视，切换图标时间轴时，会新增到 https://markets.ft.com/data/chartapi/series 的 XHR 请求，其 request payload 里的 [elements][symbol] 即为该指数对应数字。
 
-            17. 形如 FTC-WTI+Crude+Oil 格式的数据，开头可以是 FTC, FTE, FTX, FTF, FTB, FTI 对应 commdities，equities，currencies，funds，bonds，indicies。其中 FTI 和 FT 相同。
+            17. 形如 FTC-WTI+Crude+Oil 格式的数据，开头可以是 FTC, FTE, FTX, FTF, FTB, FTI 对应 ft.com 子栏目 commdities，equities，currencies，funds，bonds，indicies。其中 FTI 和 FT 相同。
 
             18. 形如 mcy-MAC_AREA_UNEMPLOY 格式的数据，返回相应的宏观数据，需要聚宽数据源。mcy，mcq，mcm 代表年度，季度和月度的数据，code 为表名，可以参考 https://www.joinquant.com/help/api/help?name=macroData
+
+            19. 形如 ZZ000905，ZZH30533 的代码，代表中证官网的指数，ZZ 之后接指数代码，注意有些指数代码里可能包含 H，历史数据最大到近五年。
+
+            20. 形如 GZB30018, GZ399299 格式的数据，代表国证系列指数， GZ 之后接指数代码，代码可能包含更多字母。
+
+            21. 形如 ESCI000201 格式的数据，易盛商品指数系列，参考 http://www.esunny.com.cn/index.php?a=lists&catid=60。
+
+            22. 形如 pt-F100032 格式的数据，返回指定基金每季度股票债券和现金的持仓比例
+
+            23. 形如 yc-companies/DBP，yc-companies/DBP/price 格式的数据，返回ycharts股票、ETF数据，对应网页 https://ycharts.com/companies/DBP/price，最后部分为数据含义，默认price，可选：net_asset_value（仅ETF可用）、total_return_price、total_return_forward_adjusted_price、average_volume_30，历史数据限制五年内。
+
+            24. 形如 yc-indices/^SPGSCICO，yc-indices/^SPGSCICO/level 格式的数据，返回ycharts指数数据，对应网页 https://ycharts.com/indices/%5ESPGSCICO/level，最后部分为数据含义，默认level，可选：total_return_forward_adjusted_price，历史数据限制五年内。
+
+            25. 形如 HZ999001 HZ999005 格式的数据，代表了华证系列指数 http://www.chindices.com/indicator.html#
+
+            26. 形如 B-AA+.3 格式的数据，代表了 AA+ 企业债三年久期利率数据 (每周)
+
+            27. 形如 fu-00700.HK 或 fu-BA.US 格式的数据，代表了来自 https://www.futunn.com/stock/BA-US 的日线行情数据
 
     :param start: str. "20200101", "2020/01/01", "2020-01-01" are all legal. The starting date of daily data.
     :param end: str. format is the same as start. The ending date of daily data.
     :param prev: Optional[int], default 365. If start is not specified, start = end-prev.
     :param _from: Optional[str]. 一般用户不需设定该选项。can be one of "xueqiu", "zjj", "investing", "tiantianjijin". Only used for debug to
-        enfore data source. For common use, _from can be chosed automatically based on code in the run time.
+        enforce data source. For common use, _from can be chosed automatically based on code in the run time.
     :param wrapper: bool. 一般用户不需设定该选项。
-    :param handler: bool. Default True. 若为 False，则 handler 钩子失效，用于钩子函数中的嵌套。
+    :param handler: bool. Default True. 若为 False，则 handler 钩子失效，用于钩子函数中的原函数嵌套调用。
     :return: pd.Dataframe.
         must include cols: date[pd.Timestamp]，close[float64]。
     """
@@ -689,7 +1070,7 @@ def _get_daily(
         start_obj = dstr2dobj(start)
 
     if not _from:
-        if code.startswith("SH") or code.startswith("SZ"):
+        if (code.startswith("SH") or code.startswith("SZ")) and code[2:8].isdigit():
             _from = "xueqiu"
         elif code.endswith("/CNY") or code.startswith("CNY/"):
             _from = "zjj"
@@ -697,13 +1078,33 @@ def _get_daily(
             _from = "cninvesting"
         elif code[0] in ["F", "M", "T"] and code[1:].isdigit():
             _from = "ttjj"
-        elif code.startswith("HK") and code[2:].isdigit() and len(code) == 7:
+        elif code.startswith("HK") and code[2:7].isdigit():
             _from = "xueqiu"
             code = code[2:]
         elif code.startswith("SP") and code[2:].split(".")[0].isdigit():
             _from = "SP"
         elif code.startswith("SPC") and code[3:].split(".")[0].isdigit():
             _from = "SPC"
+        elif code.startswith("ZZ") and code[4:].isdigit():  # 注意中证系列指数的代码里可能包含字母！
+            _from = "ZZ"
+        elif code.startswith("GZ") and code[-3:].isdigit():  # 注意国证系列指数的代码里可能包含多个字母！
+            _from = "GZ"
+        elif code.startswith("HZ") and code[2:].isdigit():
+            _from = "HZ"
+        elif code.startswith("ESCI") and code[4:].isdigit():
+            _from = "ES"
+        elif code.startswith("yc-companies/") or code.startswith("yc-indices/"):
+            _from = "ycharts"
+            params = code.split("/")
+            code = params[1]
+            category = params[0].split("-")[1]
+            if len(params) == 3:
+                metric = params[2]
+            else:
+                if category == "companies":
+                    metric = "price"
+                elif category == "indices":
+                    metric = "level"
         elif len(code.split("-")) >= 2 and len(code.split("-")[0]) <= 3:
             # peb-000807.XSHG
             _from = code.split("-")[0]
@@ -712,7 +1113,7 @@ def _get_daily(
             _from = "cninvesting"
             code = get_investing_id(code)
         else:
-            _from = "xueqiu"
+            _from = "xueqiu"  # 美股代码
 
     count = (today_obj() - start_obj).days + 1
     start_str = start_obj.strftime("%Y/%m/%d")
@@ -721,18 +1122,30 @@ def _get_daily(
         df = get_historical_fromcninvesting(code, start_str, end_str)
         df = prettify(df)
     elif _from in ["xueqiu", "xq", "snowball", "XQ"]:
-        df = get_historical_fromxq(code, count)
+        code, type_ = decouple_code(code)
+
+        df = get_historical_fromxq(code, count, type_=type_)
         df = prettify(df)
     elif _from in ["zhongjianjia", "zjj", "chinamoney", "ZJJ"]:
         df = get_rmb(start, end, prev, currency=code)
     elif _from in ["ttjj", "tiantianjijin", "xalpha", "eastmoney"]:
-        df = get_fund(code)
+        if code.startswith("F96"):
+            df = get_historical_from_ttjj_oversea(code, start=start, end=end)
+        else:
+            df = get_fund(code)
 
     elif _from == "peb":
-        if code.startswith("000") or code.startswith("399"):
+        if (
+            code.startswith("SH000")
+            or code.startswith("SZ399")
+            or code.startswith("399")
+            or code.startswith("000")
+        ):
             df = _get_peb_range(code=code, start=start_str, end=end_str)
+        elif code.startswith("F"):
+            df = get_fund_peb_range(code=code, start=start, end=end)
         else:
-            df = get_stock_peb_range(code=code, start=start, end=end)
+            df = get_stock_peb_range(code=code, start=start, end=end, wrapper=True)
 
     elif _from == "iw":
         df = _get_index_weight_range(code=code, start=start_str, end=end_str)
@@ -749,11 +1162,42 @@ def _get_daily(
     elif _from == "BB":
         df = get_historical_frombb(code, start=start, end=end)
 
+    elif _from == "ZZ":
+        df = get_historical_fromzzindex(code, start=start, end=end)
+
+    elif _from == "GZ":
+        df = get_historical_fromgzindex(code, start=start, end=end)
+
+    elif _from == "HZ":
+        df = get_historical_fromhzindex(code, start=start, end=end)
+
+    elif _from == "ES":
+        df = get_historical_fromesunny(code, start=start, end=end)
+
+    elif _from == "B":
+        df = get_bond_rates_range(code, start=start, end=end)
+
+    elif _from == "fu":
+        code = code.replace(".", "-")
+        df = get_futu_historical(code, start=start, end=end)
+
+    elif _from == "ycharts":
+        df = get_historical_fromycharts(
+            code,
+            start=start_obj.strftime("%m/%d/%Y"),
+            end=end_obj.strftime("%m/%d/%Y"),
+            category=category,
+            metric=metric,
+        )
+
     elif _from == "sw":
         df = get_sw_from_jq(code, start=start, end=end)
 
     elif _from == "teb":
         df = get_teb_range(code, start=start, end=end)
+
+    elif _from in ["pt", "portfolio"]:
+        df = get_portfolio_fromttjj(code, start=start, end=end)
 
     elif _from == "YH":
         df = get_historical_fromyh(code, start=start, end=end)
@@ -811,7 +1255,7 @@ def get_xueqiu_rt(code, token="a664afb60c7036c7947578ac1a5860c4cfb6b3b5"):
     r = rget_json(
         url.format(code=code),
         cookies={"xq_a_token": token},
-        headers={"user-agent": "Mozilla/5.0"},
+        headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_4)"},
     )
     n = r["data"]["quote"]["name"]
     q = r["data"]["quote"]["current"]
@@ -831,6 +1275,15 @@ def get_xueqiu_rt(code, token="a664afb60c7036c7947578ac1a5860c4cfb6b3b5"):
     timestr = dt.datetime.fromtimestamp(r["data"]["quote"]["time"] / 1000).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
+    if r["data"]["quote"].get("timestamp_ext", None):
+        time_ext = dt.datetime.fromtimestamp(
+            r["data"]["quote"]["timestamp_ext"] / 1000
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        time_ext = None
+    share = r["data"]["quote"]["total_shares"]
+    fshare = r["data"]["quote"]["float_shares"]
+    volume = r["data"]["quote"]["volume"]
     return {
         "name": n,
         "current": q,
@@ -839,6 +1292,10 @@ def get_xueqiu_rt(code, token="a664afb60c7036c7947578ac1a5860c4cfb6b3b5"):
         "currency": currency,
         "market": market,  # HK, US, CN
         "time": timestr,
+        "time_ext": time_ext,
+        "totshare": share,
+        "floatshare": fshare,
+        "volume": volume,
     }
 
 
@@ -872,7 +1329,10 @@ def get_cninvesting_rt(suburl, app=False):
             "X-Requested-With": "XMLHttpRequest",
         }
 
-    r = rget(url, headers=headers,)
+    r = rget(
+        url,
+        headers=headers,
+    )
     s = BeautifulSoup(r.text, "lxml")
     last_last = s.find("span", id="last_last")
     q = _float(last_last.string)
@@ -901,15 +1361,30 @@ def get_cninvesting_rt(suburl, app=False):
         if span.find("a") and span.find("a")["href"].startswith("/markets"):
             market = span.string
     market = region_trans.get(market, market)
-    return {
+    time_ext = s.select("div[class~=lastUpdated]")
+    if time_ext:
+        time_ext = time_ext[0].text.strip()
+    else:
+        time_ext = None
+    d = {
         "name": name,
         "current": q,
         "current_ext": q_ext,
         "time": timestr,
+        "time_ext": time_ext,
         "currency": currency,
         "percent": percent,
         "market": market,
     }
+
+    if suburl.startswith("commodities"):  # 商品期货展期日
+        try:
+            d["rollover"] = s.select("span[class*=float_lang_base_2]")[10].string
+            d["lastrollover"] = s.select("span[class*=float_lang_base_2]")[13].string
+        except (ValueError, IndexError, AttributeError):
+            logger.warning("%s cannot extract rollover date" % suburl)
+            # in case some commodities with strong page structure
+    return d
 
 
 def get_rt_from_sina(code):
@@ -931,25 +1406,33 @@ def get_rt_from_sina(code):
     if (
         code.startswith("SH") or code.startswith("SZ") or code.startswith("HK")
     ) and code[2:].isdigit():
+        # TODO: 20200819: API seems changed a bit, index shift?
+        # or things may get zero when the market is closed?
         if code.startswith("HK"):
             d["current"] = float(l[9])  # 英文股票名称占位
             d["currency"] = "HKD"
             d["percent"] = round(float(l[8]), 2)
             d["market"] = "HK"
             d["time"] = l[17] + " " + l[18]
-        else:
+            d["current_ext"] = None
+
+        else:  # A 股
             d["current"] = float(l[3])
             d["currency"] = "CNY"
             d["percent"] = round((float(l[3]) / float(l[2]) - 1) * 100, 2)
             d["market"] = "CN"
             d["time"] = l[-4] + " " + l[-3]
-        d["current_ext"] = None
+            for i in range(10, 19)[::2]:
+                d["buy" + str(int((i - 8) / 2))] = (l[i + 1], l[i])
+            for i in range(20, 29)[::2]:
+                d["sell" + str(int((i - 18) / 2))] = (l[i + 1], l[i])
+            d["current_ext"] = None
 
     else:
         d["currency"] = "USD"
         d["current"] = float(l[1])
         d["percent"] = float(l[2])
-        d["current_ext"] = None
+        d["current_ext"] = _float(l[21]) if _float(l[21]) > 0 else None
         d["market"] = "US"
         d["time"] = l[3]
     return d
@@ -967,12 +1450,16 @@ def make_ft_url(code, _type="indices"):
             code=code
         )
     elif _type == "commodities":
-        url = "https://markets.ft.com/data/commodities/tearsheet/summary?c={code}".format(
-            code=code
+        url = (
+            "https://markets.ft.com/data/commodities/tearsheet/summary?c={code}".format(
+                code=code
+            )
         )
     elif _type == "currencies":
-        url = "https://markets.ft.com/data/currencies/tearsheet/summary?s={code}".format(
-            code=code
+        url = (
+            "https://markets.ft.com/data/currencies/tearsheet/summary?s={code}".format(
+                code=code
+            )
         )
     elif _type == "funds":
         url = "https://markets.ft.com/data/funds/tearsheet/summary?s={code}".format(
@@ -1020,6 +1507,31 @@ def get_rt_from_ft(code, _type="indices"):
     return d
 
 
+def get_rt_from_ycharts(code):
+    if code.startswith("yc-"):
+        code = code[3:]
+    url = "https://ycharts.com/" + code
+    r = rget(url)
+    s = BeautifulSoup(r.text, "lxml")
+    qdiv = s.select("div.index-rank.col-auto")  # current
+    spans = [s for s in qdiv[0].contents if s != "\n" and s.contents]
+    d = {}
+    d["name"] = s.select("h1,h3[class=securityName]")[0].text.strip()
+    d["current"], d["percent"] = (
+        _float(spans[0].string),  # current,
+        _float(spans[1].contents[-2].string[1:-1]),  # percent
+    )
+    l = [
+        c.strip()
+        for c in s.select("span[class=index-info]")[0].string.split("\n")
+        if c.strip()
+    ]
+    d["time"] = l[1]
+    d["currency"] = l[0].split(" ")[0].strip()
+    d["market"] = None
+    return d
+
+
 @lru_cache_time(ttl=300, maxsize=512)
 def get_newest_netvalue(code):
     """
@@ -1041,33 +1553,118 @@ def get_newest_netvalue(code):
     )
 
 
+@lru_cache(maxsize=512)
+def get_hkfcode(code):
+    if code.startswith("F"):
+        code = code[1:]
+    page = rget("http://overseas.1234567.com.cn/{code}".format(code=code)).text
+    page.find("hkfcode")
+    hkfcode = (
+        page[page.find("hkfcode") :]
+        .split("=")[1]
+        .split(";")[0]
+        .lstrip()
+        .lstrip("'")
+        .strip("'")
+    )
+    return hkfcode
+
+
+def get_rt_from_ttjj_oversea(code):
+    if code.startswith("F"):
+        code = code[1:]
+    if not code.startswith("96"):
+        raise ValueError("%s is not an oversea fund" % code)
+    r = rget("http://overseas.1234567.com.cn/{code}.html".format(code=code))
+    r.encoding = "utf-8"
+    s = BeautifulSoup(r.text, "lxml")
+    start = s.select("dl.dataItem02")[0].text
+    start = start.split("(")[1].split(")")[0]
+    name = s.select("div[class='fundDetail-tit']")[0].text.split("（")[0].strip()
+    name = name.split("(")[0].strip()
+    value = _float(s.select("span.ui-font-large.ui-num")[0].text)
+    date = (
+        s.select("dl[class='dataItem01']")[0]
+        .find("p")
+        .text.split("(")[-1]
+        .split(")")[0]
+    )
+    infol = [
+        r for r in s.select("div[class='infoOfFund']")[0].text.split("\n") if r.strip()
+    ]
+    return {
+        "name": name,
+        "time": date,
+        "current": value,
+        "market": "CN",
+        "currency": None,  # 很可能存在非人民币计价的互认基金
+        "current_ext": None,
+        "type": infol[0].split("：")[1].strip(),
+        "scale": infol[1].split("：")[1].strip(),
+        "manager": infol[2].split("：")[1].strip(),
+        "startdate": start,
+    }
+
+
 @lru_cache_time(ttl=600, maxsize=512)
 def get_rt_from_ttjj(code):
     code = code[1:]
+    if code.startswith("96"):
+        return get_rt_from_ttjj_oversea(code)
     r = rget("http://fund.eastmoney.com/{code}.html".format(code=code))
     r.encoding = "utf-8"
     s = BeautifulSoup(r.text, "lxml")
-    value, date, name = (
-        float(
-            s.findAll("dd", class_="dataNums")[1]
-            .find("span", class_="ui-font-large")
-            .string
-        ),
-        str(s.findAll("dt")[1]).split("(")[1].split(")")[0][7:],
-        s.select("div[style='float: left']")[0].text.split("(")[0],
-    )
+    name = s.select("div[style='float: left']")[0].text.split("(")[0]
+    if s.findAll("dd", class_="dataNums")[1].find(
+        "span", class_="ui-font-large"
+    ):  # 非货币基金
+        value, date = (
+            float(
+                s.findAll("dd", class_="dataNums")[1]
+                .find("span", class_="ui-font-large")
+                .string
+            ),
+            str(s.findAll("dt")[1]).split("(")[1].split(")")[0][7:],
+        )
+        estimate = s.select("span[id=gz_gsz]")
+        if not estimate:
+            estimate = None
+            estimate_time = None
+        else:
+            estimate = estimate[0].text  # after loading
+            if estimate == "--":
+                gsz = rget(
+                    "http://fundgz.1234567.com.cn/js/{code}.js".format(code=code),
+                    headers={
+                        "Host": "fundgz.1234567.com.cn",
+                        "Referer": "http://fund.eastmoney.com/",
+                    },
+                )
+                try:  # in case eval error
+                    gsz_dict = eval(gsz.text[8:-2])
+                    estimate = _float(gsz_dict["gsz"])
+                    estimate_time = gsz_dict["gztime"]
+                except:
+                    estimate = None
+            else:
+                try:
+                    estimate = _float(estimate)
+                except ValueError:
+                    logger.warning("unrecognized estimate netvalue %s" % estimate)
+                    estimate = None
+    else:
+        value, date = (
+            s.findAll("dd", class_="dataNums")[1].text,
+            str(s.findAll("dt")[1]).split("(")[1].split(")")[0],
+        )
+        estimate = None
     status = s.select("span[class='staticCell']")[0].text.strip()
     tb = s.select("div.infoOfFund > table >tr>td")
     infol = [i.text for i in tb]
-    estimate = s.select("#gz_gsz")[0].text
-    if estimate == "--":
-        estimate = None
-    else:
-        try:
-            estimate = _float(estimate)
-        except ValueError:
-            logger.warning("unrecognized estimate netvalue %s" % estimate)
-            estimate = None
+    try:
+        estimate_time
+    except NameError:
+        estimate_time = None
     return {
         "name": name,
         "time": date,
@@ -1081,8 +1678,36 @@ def get_rt_from_ttjj(code):
         "manager": infol[2].split("：")[1],
         "company": infol[4].split("：")[1],
         "estimate": estimate,
+        "estimate_time": estimate_time,
     }
     # 是否有美元份额计价的基金会出问题？
+
+
+@lru_cache(2048)
+def get_fund_type(code):
+    """
+    given fund code, return unified fund category which is extracted from get_rt(code)["type"]
+
+    :param code:
+    :return: str.
+    """
+    code = code[-6:]
+    t = get_rt("F" + code)["type"]
+
+    if t in ["联接基金", "股票指数"] or t.startswith("ETF"):
+        return "指数基金"
+    elif t.startswith("QDII"):
+        return "QDII"
+    elif t.startswith("股票"):
+        return "股票基金"
+    elif t.startswith("混合"):
+        return "混合基金"
+    elif t.startswith("债券"):
+        return "债券基金"
+    elif t.startswith("货币"):
+        return "货币基金"
+    else:
+        return "其他"
 
 
 def get_rt(
@@ -1115,14 +1740,16 @@ def get_rt(
     if not _from:
         # if code.startswith("HK") and code[2:].isdigit():
         #     _from = "xueqiu"
-        if len(code.split("-")) >= 2 and len(code.split("-")[0]) <= 3:
+        if code.startswith("yc-"):
+            _from = "ycharts"
+        elif len(code.split("-")) >= 2 and len(code.split("-")[0]) <= 3:
             _from = code.split("-")[0]
             code = "-".join(code.split("-")[1:])
-        elif code.startswith("F") and code[1:].isdigit():
+        elif (code.startswith("F") or code.startswith("T")) and code[1:].isdigit():
             _from = "ttjj"
         elif len(code.split("/")) > 1:
             _from = "investing"
-        else:  # 默认不启用新浪实时，只做双重验证备份
+        else:  # 默认启用雪球实时，新浪纯指数行情不完整
             _from = "xueqiu"
     if _from in ["cninvesting", "investing"]:
         try:
@@ -1137,17 +1764,23 @@ def get_rt(
         r2 = get_rt_from_sina(code)
         if abs(r1["current"] / r2["current"] - 1) > double_check_threhold:
             raise DataPossiblyWrong("realtime data unmatch for %s" % code)
-        return r1
+        return r2
     elif _from in ["xueqiu", "xq", "snowball"]:
         try:
             return get_xueqiu_rt(code, token=get_token())
-        except Exception as e:  # 默认雪球实时引入备份机制
+        except (IndexError, ValueError, AttributeError, TypeError) as e:  # 默认雪球实时引入备份机制
             logging.warning(
                 "Fails due to %s, now trying backup data source from sina" % e.args[0]
             )
             return get_rt_from_sina(code)
     elif _from in ["sina", "sn", "xinlang"]:
-        return get_rt_from_sina(code)
+        try:
+            return get_rt_from_sina(code)
+        except (IndexError, ValueError, AttributeError, TypeError) as e:  # 默认雪球实时引入备份机制
+            logging.warning(
+                "Fails due to %s, now trying backup data source from xueqiu" % e.args[0]
+            )
+            return get_xueqiu_rt(code, token=get_token())
     elif _from in ["ttjj"]:
         return get_rt_from_ttjj(code)
     elif _from in ["FT", "ft", "FTI"]:
@@ -1164,6 +1797,8 @@ def get_rt(
         return get_rt_from_ft(code, _type="commodities")
     elif _from in ["INA"]:  # investing app
         return get_cninvesting_rt(code, app=True)
+    elif _from in ["yc", "ycharts"]:
+        return get_rt_from_ycharts(code)
     else:
         raise ParserFailure("unrecoginzed _from for %s" % _from)
 
@@ -1265,24 +1900,36 @@ def cachedio(**ioconf):
                 code = args[0]
             else:
                 code = kws.get("code")
-            date = ioconf.get("date", "date")
+            date = ioconf.get("date", "date")  # 没利用上这个栏的名字变化
             precached = ioconf.get("precached", None)
             precached = kws.get("precached", precached)
             key = kws.get("key", code)
             key = key.replace("/", " ")
+            key_func = ioconf.get("key_func", None)
+            key_func = ioconf.get("keyfunc", key_func)
+            if key_func is not None:
+                key = key_func(key)
+            defaultend = ioconf.get("defaultend", today_obj)
+            defaultend = ioconf.get("default_end", defaultend)
+            defaultprev = ioconf.get("defaultprev", 365)
+            defaultprev = ioconf.get("default_prev", defaultprev)
+            if isinstance(defaultend, str):
+                defaultend = defaultend.replace("/", "").replace("-", "")
+                defaultend = dt.datetime.strptime(defaultend, "%Y%m%d")
+            if callable(defaultend):
+                defaultend = defaultend()
             start = kws.get("start", None)
             end = kws.get("end", None)
             prev = kws.get("prev", None)
             prefix = ioconf.get("prefix", "")
             key = prefix + key
-            # print("xdebug: %s" % ioconf.get("backend", "no"))
             if precached:
                 precached = precached.replace("/", "").replace("-", "")
                 precached_obj = dt.datetime.strptime(precached, "%Y%m%d")
             if not prev:
-                prev = 365
+                prev = defaultprev
             if not end:
-                end_obj = today_obj()
+                end_obj = defaultend
             else:
                 end_obj = dt.datetime.strptime(
                     end.replace("/", "").replace("-", ""), "%Y%m%d"
@@ -1298,10 +1945,17 @@ def cachedio(**ioconf):
             start_str = start_obj.strftime("%Y%m%d")
             end_str = end_obj.strftime("%Y%m%d")
             backend = ioconf.get("backend")
+            backend = kws.get("backend", backend)
+            # if backend == "sql": # reserved for case insensitive database settings
+            #     key = key.lower()
             refresh = ioconf.get("refresh", False)
             refresh = kws.get("refresh", refresh)
-            fetchonly = kws.get("fetchonly", False)
+            fetchonly = ioconf.get("fetchonly", False)
+            fetchonly = ioconf.get("fetch_only", fetchonly)
+            fetchonly = kws.get("fetchonly", fetchonly)
+            fetchonly = kws.get("fetch_only", fetchonly)
             path = ioconf.get("path")
+            path = kws.get("path", path)
             kws["start"] = start_str
             kws["end"] = end_str
             if not backend:
@@ -1346,9 +2000,9 @@ def cachedio(**ioconf):
                             if has_weekday(kws["start"], kws["end"]):
                                 # 考虑到海外市场的不同情况，不用 opendate 判断，采取保守型判别
                                 df1 = f(*args, **kws)
-                                if len(df1) > 0:
+                                if df1 is not None and len(df1) > 0:
                                     df1 = df1[df1["date"] <= kws["end"]]
-                                if len(df1) > 0:
+                                if df1 is not None and len(df1) > 0:
                                     is_changed = True
                                     df0 = df1.append(df0, ignore_index=True, sort=False)
                         # 向后延拓
@@ -1363,9 +2017,9 @@ def cachedio(**ioconf):
                             kws["end"] = end_str
                             if has_weekday(nextday_str, kws["end"]):  # 新更新的日期里有工作日
                                 df2 = f(*args, **kws)
-                                if len(df2) > 0:
+                                if df2 is not None and len(df2) > 0:
                                     df2 = df2[df2["date"] >= kws["start"]]
-                                if len(df2) > 0:
+                                if df2 is not None and len(df2) > 0:
                                     is_changed = True
                                     if (
                                         len(df0[df0["date"] == df0.iloc[-1]["date"]])
@@ -1524,7 +2178,7 @@ def _get_peb_range(code, start, end):  # 盈利，净资产，总市值
     return pd.DataFrame(data)
 
 
-def get_stock_peb_range(code, start, end):
+def get_stock_peb_range(code, start, end, wrapper=False):
     """
     获取股票历史 pe pb
 
@@ -1538,9 +2192,142 @@ def get_stock_peb_range(code, start, end):
     count = (today_obj() - dt.datetime.strptime(start, "%Y%m%d")).days
     df = get_historical_fromxq(code, count, full=True)
     df = df[["date", "pe", "pb", "ps"]]
-    df = df[df["date"] >= start]
-    df = df[df["date"] <= end]
+    if not wrapper:
+        df = df[df["date"] >= start]
+        df = df[df["date"] <= end]
     return df
+
+
+@lru_cache()
+def ttjjcode(code):
+    """
+    将天天基金的持仓股票代码或其他来源的代码标准化
+
+    :param code: str.
+    :return: str.
+    """
+    code = code.strip()
+    if code.endswith(".HK"):
+        return "HK" + code[:-3]
+    elif code.endswith(".US"):
+        return code[:-3]
+    elif code.isdigit() and len(code) == 5:
+        return "HK" + code
+    elif code.isdigit() and len(code) == 6:
+        if (
+            code.startswith("16")
+            or code.startswith("15")
+            or code.startswith("12")
+            or code.startswith("0")
+            or code.startswith("3")
+        ):
+            # 注意这里只能对应个股，指数代码有重叠没有办法的事
+            return "SZ" + code
+        elif code.startswith("5") or code.startswith("6") or code.startswith("11"):
+            return "SH" + code
+        else:
+            logger.warning("unrecognized code format %s" % code)
+            return "0"
+    else:
+        logger.info("not so sure about code format %s, taken as US stock" % code)
+        return code
+
+
+def get_fund_peb(code, date, threhold=0.3):
+    """
+    根据基金的股票持仓，获取对应日期的 pe，pb 估值
+
+    :param code: str. 基金代码
+    :param date:
+    :param threhold: float, default 0.3. 为了计算快速，占比小于千分之三的股票将舍弃
+    :return:
+    """
+    if code.startswith("F"):
+        code = code[1:]
+    date = date.replace("/", "").replace("-", "")
+    d = dt.datetime.strptime(date, "%Y%m%d")
+    if d.month > 3 and d.month < 8:
+        year = d.year - 1
+        season = 4
+    elif d.month <= 3:
+        year = d.year - 1
+        season = 2
+    else:
+        year = d.year
+        season = 2
+        # season 只选 2，4, 具有更详细的持仓信息
+    df = get_fund_holdings(code, year, season)
+    if df is None:
+        if season == 4:
+            season = 2
+        else:
+            year -= 1
+            season = 4
+        df = get_fund_holdings(code, year, season)
+    if df is None:
+        logger.warning("%s seems has no holdings data in this time %s" % (code, year))
+        return {"pe": None, "pb": None}
+    df = df[df["ratio"] >= threhold]
+    df["scode"] = df["code"].apply(ttjjcode)
+    df = df[df["scode"] != "0"]
+    if len(df) == 0:
+        return {"pe": None, "pb": None}
+
+    pel, pbl = [], []
+    for i, r in df.iterrows():
+        try:
+            fdf = get_daily("peb-" + r["scode"], end=date, prev=60)
+            if len(fdf) == 0:
+                # 已退市或改名
+                logger.warning("%s: 无法获取，可能已退市,当时休市或改名" % r["scode"])
+                pel.append(None)
+                pbl.append(None)
+            else:
+                fdf = fdf.iloc[-1]
+                pel.append(fdf["pe"])
+                pbl.append(fdf["pb"])
+        except (KeyError, TypeError, IndexError) as e:
+            logger.warning(
+                "%s: 获取历史估值出现问题: %s, 可能由于网站故障或股票代码非中美市场" % (r["scode"], e.args[0])
+            )
+            pel.append(None)
+            pbl.append(None)
+    df["pe"] = pel
+    df["pb"] = pbl
+    r = {}
+    pedf = df[~pd.isna(df["pe"])]
+    pbdf = df[~pd.isna(df["pb"])]
+    if len(pbdf) < 0.5 * len(df):  # 有时候会有个别标的有pb值
+        r["pb"] = None
+    else:
+        pbdf["b"] = pbdf["ratio"] / (pbdf["pb"] + 0.000001)
+        r["pb"] = pbdf.ratio.sum() / pbdf.b.sum()
+    if len(pedf) == 0:
+        r["pe"] = None
+    else:
+        pedf["e"] = pedf["ratio"] / (pedf["pe"] + 0.000001)
+        r["pe"] = pedf.ratio.sum() / pedf.e.sum()
+    return r
+
+
+def get_fund_peb_range(code, start, end):
+    """
+    获取一段时间的基金历史估值，每周五为频率
+
+    :param code:
+    :param start:
+    :param end:
+    :return:
+    """
+    if code.startswith("F"):
+        code = code[1:]
+    data = {"date": [], "pe": [], "pb": []}
+    for d in pd.date_range(start=start, end=end, freq="W-FRI"):
+        data["date"].append(d)
+        r = get_fund_peb(code, date=d.strftime("%Y-%m-%d"))
+        data["pe"].append(r["pe"])
+        data["pb"].append(r["pb"])
+    return pd.DataFrame(data)
 
 
 def set_backend(**ioconf):
@@ -1587,8 +2374,8 @@ def get_peb(index, date=None, table=False):
     ).replace(day=1)
     iwdf = get_index_weight_range(
         index,
-        start=(middle - dt.timedelta(days=5)).strftime("%Y-%m-%d"),
-        end=(middle + dt.timedelta(days=5)).strftime("%Y-%m-%d"),
+        start=(middle - dt.timedelta(days=10)).strftime("%Y-%m-%d"),
+        end=(middle + dt.timedelta(days=6)).strftime("%Y-%m-%d"),
     )
     q = query(valuation).filter(valuation.code.in_(list(iwdf.code)))
     logger.debug("get_fundamentals on %s" % (date))
@@ -1601,7 +2388,10 @@ def get_peb(index, date=None, table=False):
     totb = df.b.sum()
     if table:
         return df
-    return {"pe": round(100.0 / tote, 3), "pb": round(100.0 / totb, 3)}
+    return {
+        "pe": (round(100.0 / tote, 3) if tote != 0 else np.inf),
+        "pb": (round(100.0 / totb, 3) if totb != 0 else np.inf),
+    }
 
 
 @data_source("jq")
@@ -1635,18 +2425,19 @@ def get_teb(code, date):
     df = get_fundamentals(query(valuation).filter(valuation.code.in_(sl)), date=date)
     df["e"] = df["market_cap"] / df["pe_ratio"]
     df["b"] = df["market_cap"] / df["pb_ratio"]
-    return {"e": df["e"].sum(), "b": df["b"].sum()}  # 亿人民币
+    return {"e": df["e"].sum(), "b": df["b"].sum(), "m": df["market_cap"].sum()}  # 亿人民币
 
 
-def get_teb_range(code, start, end):
+def get_teb_range(code, start, end, freq="W-FRI"):
     if len(code.split(".")) != 2:
         code = _inverse_convert_code(code)
-    data = {"date": [], "e": [], "b": []}
-    for d in pd.date_range(start, end, freq="W-FRI"):
+    data = {"date": [], "e": [], "b": [], "m": []}
+    for d in pd.date_range(start, end, freq=freq):
         data["date"].append(d)
         r = get_teb(code, d.strftime("%Y-%m-%d"))
         data["e"].append(r["e"])
         data["b"].append(r["b"])
+        data["m"].append(r["m"])
     df = pd.DataFrame(data)
     return df
 
@@ -1702,8 +2493,8 @@ def get_bar(
 
     if not _from:
         if (
-            (start is None)
-            and (end is None)
+            (start is not None)
+            and (end is not None)
             and (code.startswith("SH") or code.startswith("SZ"))
         ):
             _from = "jq"
@@ -1711,10 +2502,10 @@ def get_bar(
             _from = "xueqiu"
         elif code.isdigit():
             _from = "cninvesting"
-        elif code.startswith("HK") and code[2:].isdigit() and len(code) == 7:
+        elif code.startswith("HK") and code[2:7].isdigit():
             _from = "xueqiu"
             code = code[2:]
-        elif len(code.split("-")) > 2 and len(code.split("-")[0]) <= 3:
+        elif len(code.split("-")) >= 2 and len(code.split("-")[0]) <= 3:
             _from = code.split("-")[0]
             code = "-".join(code.split("-")[1:])
         elif len(code.split("/")) > 1:
@@ -1728,15 +2519,16 @@ def get_bar(
         return get_bar_frominvesting(code, prev, interval)
     elif _from in ["INA"]:
         return get_bar_frominvesting(code, prev, interval)
-        # 这里 app 源是 404，只能用网页源
+        # 这里 investing app 源是 404，只能用网页源
     elif _from in ["jq"]:
+        code, type_ = decouple_code(code)
+        # 关于复权，聚宽各个时间密度的数据都有复权，雪球源日线以上的高频数据没有复权
+        type_map = {"after": "post", "before": "pre", "normal": None}
         return get_bar_fromjq(
-            code,
-            start=kws["start"],
-            end=kws["end"],
-            interval=interval,
-            fq=kws.get("fq", "pre"),
+            code, start=start, end=end, interval=interval, fq=type_map[type_]
         )
+    elif _from in ["wsj"]:
+        return get_bar_fromwsj(code, interval=interval)[-prev:]
     else:
         raise ParserFailure("unrecoginized _from %s" % _from)
 
@@ -1832,10 +2624,15 @@ def get_bar_fromxq(code, prev, interval=3600):
         "604800": "week",
         "2592000": "month",
     }
+    code, type_ = decouple_code(code)
     interval = trans.get(str(interval), interval)
-    url = "https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={code}&begin={tomorrow}&period={interval}&type=before\
+    url = "https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={code}&begin={tomorrow}&period={interval}&type={type_}\
 &count=-{prev}&indicator=kline,pe,pb,ps,pcf,market_capital,agt,ggt,balance".format(
-        code=code, tomorrow=int(tomorrow_ts() * 1000), prev=prev, interval=interval
+        code=code,
+        tomorrow=int(tomorrow_ts() * 1000),
+        prev=prev,
+        interval=interval,
+        type_=type_,
     )
     r = rget(
         url, headers={"user-agent": "Mozilla/5.0"}, cookies={"xq_a_token": get_token()}
@@ -1862,13 +2659,68 @@ def get_bar_fromxq(code, prev, interval=3600):
     return df
 
 
+def get_bar_fromwsj(code, token=None, interval=3600):
+    # proxy required
+    # code = "FUTURE/US/XNYM/CLM20"
+    # TODO: also not explore the code format here extensively
+    trans = {"3600": "1H"}
+    # TODO: there is other freq tags, but I have no time to explore them, contributions are welcome:)
+    freq = trans.get(str(interval), interval)
+    if not token:
+        token = "cecc4267a0194af89ca343805a3e57af"
+    # the thing I am concerned here is whether token is refreshed
+
+    params = {
+        "json": '{"Step":"PT%s","TimeFrame":"D5","EntitlementToken":"%s",\
+"IncludeMockTick":true,"FilterNullSlots":false,"FilterClosedPoints":true,"IncludeClosedSlots":false,\
+"IncludeOfficialClose":true,"InjectOpen":false,"ShowPreMarket":false,"ShowAfterHours":false,\
+"UseExtendedTimeFrame":false,"WantPriorClose":true,"IncludeCurrentQuotes":false,\
+"ResetTodaysAfterHoursPercentChange":false,\
+"Series":[{"Key":"%s","Dialect":"Charting","Kind":"Ticker","SeriesId":"s1","DataTypes":["Last"]}]}'
+        % (freq, token, code),
+        "ckey": token[:10],
+    }
+    r = rget_json(
+        "https://api-secure.wsj.net/api/michelangelo/timeseries/history",
+        params=params,
+        headers={
+            "user-agent": "Mozilla/5.0",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Dylan2010.EntitlementToken": token,
+            "Host": "api-secure.wsj.net",
+            "Origin": "https://www.marketwatch.com",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+
+    df = pd.DataFrame(
+        {
+            "date": r["TimeInfo"]["Ticks"],
+            "close": [n[0] for n in r["Series"][0]["DataPoints"]],
+        }
+    )
+    df["date"] = pd.to_datetime(df["date"] * 1000000) + pd.Timedelta(hours=8)
+    df = df[df["close"] > -100.0]  # 存在未来数据占位符需要排除
+    return df
+
+
 class vinfo(basicinfo, indicator):
     """
     vinfo is an info like class wrapper for get_daily, it behaves like info
     """
 
     def __init__(
-        self, code, name=None, start=None, end=None, rate=0, col="close", **kws
+        self,
+        code,
+        name=None,
+        start=None,
+        end=None,
+        rate=0,
+        col="close",
+        normalization=True,
+        **kws
     ):
         if not name:
             try:
@@ -1880,8 +2732,12 @@ class vinfo(basicinfo, indicator):
         self.start = start  # None is one year ago
         self.end = end  # None is yesterday
         df = get_daily(code, start=start, end=end)
+        df[col] = pd.to_numeric(df[col])  # in case the col is not float
         df["totvalue"] = df[col]
-        df["netvalue"] = df[col] / df.iloc[0][col]
+        if normalization:
+            df["netvalue"] = df[col] / df.iloc[0][col]
+        else:
+            df["netvalue"] = df[col]
         self.price = df
         self.round_label = kws.get("round_label", 0)
         self.dividend_label = kws.get("dividend_label", 0)

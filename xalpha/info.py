@@ -24,8 +24,9 @@ from xalpha.cons import (
     yesterday,
     yesterdaydash,
     yesterdayobj,
-    today,
+    today_obj,
     rget,
+    rget_json,
     _float,
 )
 from xalpha.exceptions import FundTypeError, TradeBehaviorError, ParserFailure
@@ -73,6 +74,8 @@ def _nfloat(string):
                 result = -float(re.match(r".*折算(\d*\.\d*)\D*", string).group(1))
             elif re.match(r'"拆分\D*(\d*\.\d*)\D*"', string):
                 result = -float(re.match(r'"拆分\D*(\d*\.\d*)\D*"', string).group(1))
+            elif re.match(r"\D*分拆(\d*\.\d*)\D*", string):
+                result = -float(re.match(r"\D*分拆(\d*\.\d*)\D*", string).group(1))
             else:
                 logger.warning("The comment col cannot be converted: %s" % string)
                 result = string
@@ -107,26 +110,29 @@ class FundReport:
         :return:
         """
         if id_:
-            report_url = "http://fund.eastmoney.com/gonggao/{code},{id_}.html".format(
-                code=self.code, id_=id_
+            report_url = "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code={id_}".format(
+                id_=id_
             )
-            r = rget(report_url)
-            b = BeautifulSoup(r.text, "lxml")
-            seasonr = b.find("pre")
-            sr = [s.string.strip() for s in seasonr.findAll("p") if s.string]
-            return sr
 
         if not self.report_detail.get(no):
-            report_url = "http://fund.eastmoney.com/gonggao/{code},{id_}.html".format(
-                code=self.code, id_=self.report_list[no]["ID"]
+            report_url = "https://np-cnotice-fund.eastmoney.com/api/content/ann?client_source=web_fund&show_all=1&art_code={id_}".format(
+                id_=self.report_list[no]["ID"]
             )
-            r = rget(report_url)
-            b = BeautifulSoup(r.text, "lxml")
-            seasonr = b.find("pre")
-            sr = [s.string.strip() for s in seasonr.findAll("p") if s.string]
-            self.report_detail[no] = sr
 
-        return self.report_detail[no]
+            # report_url = "http://fund.eastmoney.com/gonggao/{code},{id_}.html".format(
+            #     code=self.code, id_=self.report_list[no]["ID"]
+            # )
+            # r = rget(report_url)
+            # b = BeautifulSoup(r.text, "lxml")
+            # seasonr = b.find("pre")
+            # sr = [s.string.strip() for s in seasonr.findAll("p") if s.string]
+        r = rget_json(report_url)
+
+        sr = r["data"]["notice_content"]
+        sr = [s.strip() for s in sr.split("\n") if s.strip()]
+        self.report_detail[no] = sr
+
+        return sr
 
     def show_report_list(self, type_=3):
         """
@@ -190,7 +196,7 @@ class FundReport:
 
 
 @lru_cache()
-def get_fund_holdings(code, year, season=None, month=None, category="jjcc"):
+def get_fund_holdings(code, year="", season="", month="", category="jjcc"):
     """
     获取基金详细的底层持仓信息
 
@@ -201,9 +207,7 @@ def get_fund_holdings(code, year, season=None, month=None, category="jjcc"):
     :param category: str. stock 股票持仓， bond 债券持仓，天天基金无法自动处理海外基金持仓，暂未兼容 FOF 的国内基金持仓
     :return: pd.DataFrame or None. 没有对应持仓时返回 None。
     """
-    if not season and not month:
-        raise ValueError("at least specify one of season and month")
-    if not month:
+    if not month and season:
         month = 3 * int(season)
     if category in ["stock", "stocks", "jjcc", "", "gp", "s"]:
         category = "jjcc"
@@ -211,6 +215,8 @@ def get_fund_holdings(code, year, season=None, month=None, category="jjcc"):
         category = "zqcc"
     else:
         raise ParserFailure("unrecognized category %s" % category)
+    if code.startswith("F"):
+        code = code[1:]
     r = rget(
         "http://fundf10.eastmoney.com/FundArchivesDatas.aspx?type={category}&code={code}&topline=10&\
 year={year}&month={month}".format(
@@ -240,12 +246,13 @@ year={year}&month={month}".format(
         i.string for i in s.findAll("font", class_="px12") if i.text.startswith("2")
     ]
     ind = 0
-    for i, d in enumerate(timeline):
-        if d.split("-")[1][-1] == str(month)[-1]:  # avoid 09 compare to 9
-            ind = i
-            break
-    else:
-        return
+    if month:
+        for i, d in enumerate(timeline):
+            if d.split("-")[1][-1] == str(month)[-1]:  # avoid 09 compare to 9
+                ind = i
+                break
+        else:
+            return  # not update to this month
     t1 = s.findAll("table")[ind]
     main = [[j.text for j in i.contents] for i in t1.findAll("tr")[1:]]
     cols = [j.text for j in t1.findAll("tr")[0].contents if j.text.strip()]
@@ -320,7 +327,7 @@ class basicinfo(indicator):
         self.fenhongdate = []
         self.zhesuandate = []
 
-        # compatible with new xa.set_backend()
+        # compatible with new ``xa.set_backend()`` API
         import xalpha.universal as xu
 
         if (xu.ioconf["backend"] in ["csv", "sql"]) and (not path):
@@ -328,7 +335,8 @@ class basicinfo(indicator):
             save = True
             form = xu.ioconf["backend"]
             path = xu.ioconf["path"]
-            path = os.path.join(path, xu.ioconf["prefix"] + "INFO-")
+            if xu.ioconf["backend"] == "csv":
+                path = os.path.join(path, xu.ioconf["prefix"] + "INFO-")
         self.format = form
         if fetch is False:
             self._basic_init()  # update self. name rate and price table
@@ -339,7 +347,7 @@ class basicinfo(indicator):
                 if (df is not None) and save is True:
                     self.save(path, self.format, option="a", delta=df)
 
-            except (FileNotFoundError, exc.ProgrammingError) as e:
+            except (FileNotFoundError, exc.ProgrammingError, exc.OperationalError) as e:
                 logger.info("no saved copy of %s" % self.code)
                 fetch = False
                 self._basic_init()
@@ -357,7 +365,7 @@ class basicinfo(indicator):
         # self.price = pd.DataFrame(data={'date':[],'netvalue':[],'comment':[]})
         raise NotImplementedError
 
-    def shengou(self, value, date):
+    def shengou(self, value, date, fee=None):
         """
         give the realdate deltacash deltashare tuple based on purchase date and purchase amount
         if the date is not a trade date, then the purchase would happen on the next trade day, if the date is
@@ -365,17 +373,18 @@ class basicinfo(indicator):
 
         :param value: the money for purchase
         :param date: string or object of date
+        :param fee: the rate for shengou, default None and info.rate will be used, ok for most cases
         :returns: three elements tuple, the first is the actual dateobj of commit
             the second is a negative float for cashin,
             the third is a positive float for share increase
         """
+        if fee is None:
+            fee = self.rate
         row = self.price[self.price["date"] >= date].iloc[0]
-        share = _shengoucal(value, self.rate, row.netvalue, label=self.round_label + 1)[
-            1
-        ]
+        share = _shengoucal(value, fee, row.netvalue, label=self.round_label + 1)[1]
         return (row.date, -myround(value), share)
 
-    def shuhui(self, share, date, rem):
+    def shuhui(self, share, date, rem, value_label=None, fee=None):
         """
         give the cashout considering redemption rates as zero.
         if the date is not a trade date, then the purchase would happen on the next trade day, if the date is
@@ -383,11 +392,16 @@ class basicinfo(indicator):
 
         :param share: float or int, number of shares to be sold. if value_label=1, its cash to be sold.
         :param date: string or object of date
+        :param rem: positions with time list
+        :param value_label: default None, value_label will be chosen by info.value_label, determining
+                whether shuhui by share 0 or value 1. value_label = 0 will rewrite self.value_label = 1
+        :param fee: default None, determined automatically, suggested for most of the cases.
+                Otherwise 0.015 means 1.5% in shuhui, this is different than fee in shengou, where 1.5 is for 1.5% fee
         :returns: three elements tuple, the first is dateobj
             the second is a positive float for cashout,
             the third is a negative float for share decrease
         """
-        if self.value_label == 0:
+        if self.value_label == 0 or value_label == 0:
             return self._shuhui_by_share(share, date, rem)
         elif self.value_label == 1:  # 按金额赎回，仅支持无赎回费的货币基金
             partprice = self.price[self.price["date"] >= date]
@@ -396,9 +410,9 @@ class basicinfo(indicator):
             else:
                 row = partprice.iloc[0]
             share = share / row.netvalue
-            return self._shuhui_by_share(share, date, rem)
+            return self._shuhui_by_share(share, date, rem, fee=fee)
 
-    def _shuhui_by_share(self, share, date, rem):
+    def _shuhui_by_share(self, share, date, rem, fee=None):
         date = convert_date(date)
         tots = sum([remitem[1] for remitem in rem if remitem[0] <= date])
         if share > tots:
@@ -411,6 +425,8 @@ class basicinfo(indicator):
         else:
             row = partprice.iloc[0]
         value = myround(sh * row.netvalue)
+        if fee is not None:
+            value = (1 - fee) * value
         return (
             row.date,
             value,
@@ -517,6 +533,13 @@ class fundinfo(basicinfo):
             label = 1  # the scheme of round down on share purchase
         else:
             label = 0
+        if code.startswith("F") and code[1:].isdigit():
+            code = code[1:]
+        elif code.startswith("M") and code[1:].isdigit():
+            raise FundTypeError(
+                "This code seems to be a mfund, use ``mfundinfo`` instead"
+            )
+        code = code.zfill(6)  # 1234 is the same as 001234
         self._url = (
             "http://fund.eastmoney.com/pingzhongdata/" + code + ".js"
         )  # js url api for info of certain fund
@@ -524,8 +547,7 @@ class fundinfo(basicinfo):
             "http://fund.eastmoney.com/f10/jjfl_" + code + ".html"
         )  # html url for trade fees info of certain fund
         self.priceonly = priceonly
-        if code.startswith("F") and code[1:].isdigit():
-            code = code[1:]
+
         super().__init__(
             code,
             fetch=fetch,
@@ -546,6 +568,9 @@ class fundinfo(basicinfo):
             print("There are still string comments for the fund!")
 
     def _basic_init(self):
+        if self.code.startswith("96"):
+            self._hkfund_init()  # 中港互认基金处理
+            return
         self._page = rget(self._url)
         if self._page.status_code == 404:
             raise ParserFailure("Unrecognized fund, please check fund code you input.")
@@ -677,6 +702,7 @@ class fundinfo(basicinfo):
                 .replace("以内", "")
                 .replace("的", "")
                 .replace("(含7天)", "")
+                .replace("份额持有时间", "")
             ).split("，")
             for i in range(int(len(a) / 2))
         ]
@@ -725,7 +751,29 @@ class fundinfo(basicinfo):
                 return float(self.feeinfo[i].strip("%"))
         return 0  # error backup, in case there is sth wrong in segment
 
-    def shuhui(self, share, date, rem):
+    def set_feeinfo(self, feeinfo):
+        """
+        设置正确的赎回费率信息
+
+        :param feeinfo: List[string]
+        """
+        self.feeinfo = feeinfo
+        self.segment = self._piecewise(feeinfo)
+
+    def set_price(self, col, date, value):
+        """
+        设置修正 price 表中单日的 comment 或价格信息
+
+        :param col: str. "comment", "netvalue" or "totvalue"
+        :param date: “%Y%m%d”
+        :param value:
+        """
+        self.price.loc[self.price["date"] == date, col] = value
+        ## update special in case new comment is added
+        self.special = self.price[self.price["comment"] != 0]
+        self.specialdate = list(self.special["date"])
+
+    def shuhui(self, share, date, rem, value_label=None, fee=None):
         """
         give the cashout based on rem term considering redemption rates
 
@@ -744,8 +792,12 @@ class fundinfo(basicinfo):
         value = 0
         sh = myround(sum([item[1] for item in soldrem]))
         for d, s in soldrem:
+            if fee is None:
+                tmpfee = self.feedecision((row.date - d).days) * 1e-2
+            else:
+                tmpfee = fee
             value += myround(
-                s * row.netvalue * (1 - self.feedecision((row.date - d).days) * 1e-2)
+                s * row.netvalue * (1 - tmpfee)
             )  # TODO: round_label whether play a role here?
         return (row.date, value, -sh)
 
@@ -848,10 +900,38 @@ class fundinfo(basicinfo):
             # print('no saved copy of %s' % self.code)
             raise e
 
+    def _hk_update(self):
+        # 暂时不确定增量更新逻辑无 bug，需时间验证
+        # 注意增量更新时分红的同步更新
+        lastdate = self.price.iloc[-1].date
+        diffdays = (yesterdayobj() - lastdate).days
+        if diffdays == 0:
+            return None
+        import xalpha.universal as xu
+
+        df = xu.get_daily("F" + self.code, start=lastdate.strftime("%Y%m%d"))
+        df = df[df["date"].isin(opendate)]
+        df = df.reset_index(drop=True)
+        df = df[df["date"] <= yesterdayobj()]
+        df = df[df["date"] > lastdate]
+
+        if len(df) != 0:
+            r = self._hk_bonus(start=lastdate.strftime("%Y-%m-%d"))
+            df["comment"] = [0 for _ in range(len(df))]
+            df["netvalue"] = df["close"]
+            df = df.drop("close", axis=1)
+            df = df[df["date"].isin(opendate)]  # ? 是否会过滤掉分红日
+            for d in r:
+                df.loc[df["date"] == d["EXDDATE"], "comment"] = d["BONUS"]
+            self.price = self.price.append(df, ignore_index=True, sort=True)
+            return df
+
     def update(self):
         """
         function to incrementally update the pricetable after fetch the old one
         """
+        if self.code.startswith("96"):
+            return self._hk_update()
         lastdate = self.price.iloc[-1].date
         diffdays = (yesterdayobj() - lastdate).days
         if (
@@ -866,7 +946,7 @@ class fundinfo(basicinfo):
         con = rget(self._updateurl)
         soup = BeautifulSoup(con.text, "lxml")
         items = soup.findAll("td")
-        if dt.datetime.strptime(str(items[0].string), "%Y-%m-%d") == today():
+        if dt.datetime.strptime(str(items[0].string), "%Y-%m-%d") == today_obj():
             diffdays += 1
         if diffdays <= 10:
             self._updateurl = (
@@ -906,8 +986,8 @@ class fundinfo(basicinfo):
             ts = pd.Timestamp(str(items[7 * i].string))
             if (ts - lastdate).days > 0:
                 date.append(ts)
-                netvalue.append(float(items[7 * i + 1].string))
-                totvalue.append(float(items[7 * i + 2].string))
+                netvalue.append(_float(items[7 * i + 1].string))
+                totvalue.append(_float(items[7 * i + 2].string))
                 comment.append(_nfloat(items[7 * i + 6].string))
             else:
                 break
@@ -927,20 +1007,173 @@ class fundinfo(basicinfo):
             self.price = self.price.append(df, ignore_index=True, sort=True)
             return df
 
-    def get_holdings(self, year, season=None, month=None, category="stock"):
+    def get_holdings(self, year="", season="", month="", category="stock"):
         return get_fund_holdings(
             self.code, year, season=season, month=month, category=category
         )
 
-    def get_stock_holdings(self, year, season=None, month=None):
+    def get_stock_holdings(self, year="", season="", month=""):
+        """
+        持仓个股细节
+
+        :param year:
+        :param season:
+        :param month:
+        :return: pd.DataFrame
+        """
         return get_fund_holdings(
             self.code, year, season=season, month=month, category="stock"
         )
 
-    def get_bond_holdings(self, year, season=None, month=None):
+    def get_bond_holdings(self, year="", season="", month=""):
+        """
+        持仓债券细节
+
+        :param year:
+        :param season:
+        :param month:
+        :return: pd.DataFrame
+        """
         return get_fund_holdings(
             self.code, year, season=season, month=month, category="bond"
         )
+
+    def get_portfolio_holdings(self, date=None):
+        """
+        持仓股债现金占比
+
+        :param date:
+        :return: Dict
+        """
+        if date is None:
+            date = dt.datetime.now().strftime("%Y-%m-%d")
+        import xalpha.universal as xu
+
+        df = xu.get_daily("pt-F" + self.code, end=date)
+        if df is not None:
+            d = dict(df.iloc[-1])
+            del d["assets"], d["date"]
+            return d
+        else:
+            logger.warning("no portfolio information before %s" % date)
+            return
+
+    def get_industry_holdings(self, year="", season="", month="", threhold=0.5):
+        """
+        持仓行业占比
+
+        :param year:
+        :param season:
+        :param month:
+        :param threhold: float, 持仓小于该百分数的个股行业不再统计，加快速度
+        :return:  Dict
+        """
+        # 注意该 API 未直接使用天天基金的行业数据，其数据行业划分比较奇怪，大量行业都划分进了笼统的制造业，
+        # 用于分析代表性不强，甚至没有消费，医药等行业划分方式
+
+        from xalpha.universal import ttjjcode, get_industry_fromxq
+
+        df = self.get_stock_holdings(year=year, season=season, month=month)
+        if df is None:
+            logger.warning(
+                "%s has no stock holdings in %s y %s s. (Possible reason: 链接基金，债券基金)"
+                % (self.code, year, season)
+            )
+            return
+        d = {}
+        for i, row in df.iterrows():
+            if row["ratio"] < threhold:
+                continue
+            code = ttjjcode(row["code"])
+            industry = get_industry_fromxq(code)["industryname"]
+            if not industry.strip():
+                logger.warning(
+                    "%s has no industry information, cannot be classfied" % code
+                )
+            else:
+                if industry not in d:
+                    d[industry] = 0
+                d[industry] += row["ratio"]
+        return d
+
+    def which_industry(self, threhold=1.0):
+        """
+        Experimental API
+        当单一行业占比较其他行业的 threhold 倍还多时，自动判定为对应的行业基金
+        注意这里的行业可能比较细分，导致持仓多个行业其实是同一大行业从而误判为宽基基金的可能
+
+        :param threhold: float
+        :return: str
+        """
+        d = self.get_industry_holdings()
+        l = sorted([(k, v) for k, v in d.items()], key=lambda s: -s[1])
+        s0 = 0
+        if l and l[0] and l[0][1]:
+            s0 = l[0][1]
+        s1 = sum([l[i][1] for i in range(1, len(l))])
+        if s0 > threhold * s1:
+            return "行业基金： " + l[0][0]
+        else:
+            return "宽基基金"
+
+    def _hkfund_init(self):
+        import xalpha.universal as xu
+
+        # 互认基金国内休市日也有净值，暂时过滤，不确定是否会引起兼容性问题
+        self.meta = xu.get_rt("F" + self.code)
+        self.start = self.meta["startdate"]
+        self.name = self.meta["name"]
+        self.price = xu.get_daily("F" + self.code, start=self.start)
+        self.feeinfo = ["小于7天", "0.00%", "大于等于7天", "0.00%"]  # 似乎该类型基金都不收取赎回费
+        self.segment = fundinfo._piecewise(self.feeinfo)
+        r = rget("http://overseas.1234567.com.cn/f10/FundSaleInfo/968012#SaleInfo")
+        b = BeautifulSoup(r.text, "lxml")
+        self.rate = _float(
+            [
+                c.strip()
+                for c in b.select(".HK_Fund_Table.BigText")[5].text.split("\n")
+                if c.strip()
+            ][-1]
+            .split("|")[-1]
+            .strip()[:-1]
+        )
+        r = self._hk_bonus()
+        df = self.price
+        df["comment"] = [0 for _ in range(len(df))]
+        df["netvalue"] = df["close"]
+        df["date"] = pd.to_datetime(df["date"])
+        df = df[df["date"].isin(opendate)]  # ? 是否会过滤掉分红日
+        for d in r:
+            df.loc[df["date"] == d["EXDDATE"], "comment"] = d["BONUS"]
+        df = df.drop("close", axis=1)
+        self.price = df
+
+    def _hk_bonus(self, start=None):
+        """
+        [summary]
+
+        :param start: "%Y-%m-%d", defaults to None
+        :type start: [type], optional
+        """
+        import xalpha.universal as xu
+
+        todaydash = today_obj().strftime("%Y-%m-%d")
+        if not start:
+            start = self.price.iloc[0]["date"].strftime("%Y-%m-%d")
+        pagesize = int(
+            (today_obj() - dt.datetime.strptime(start, "%Y-%m-%d")).days / 5
+        )  # 如果存在一周超过一次分红的基金，算我没说
+        self.hkfcode = xu.get_hkfcode(self.code)
+        r = rget_json(
+            "http://overseas.1234567.com.cn/overseasapi/OpenApiHander.ashx?\
+api=HKFDApi&m=MethodJZ&hkfcode={hkfcode}&action=3&pageindex=0&pagesize={pagesize}&date1={startdash}&date2={enddash}&callback=".format(
+                hkfcode=self.hkfcode,
+                pagesize=pagesize,
+                startdash=start,
+                enddash=todaydash,
+            )
+        )
+        return r["Data"]
 
 
 class indexinfo(basicinfo):
@@ -963,6 +1196,10 @@ class indexinfo(basicinfo):
         self, code, value_label=0, fetch=False, save=False, path="", form="csv"
     ):
         date = yesterday()
+        if code.startswith("SH") and code[2:].isdigit():
+            code = "0" + code[2:]
+        elif code.startswith("SZ") and code[2:].isdigit():
+            code = "1" + code[2:]
         self.rate = 0
         self._url = (
             "http://quotes.money.163.com/service/chddata.html?code="
@@ -971,10 +1208,6 @@ class indexinfo(basicinfo):
             + date
             + "&fields=TCLOSE"
         )
-        if code.startswith("SH") and code[2:].isdigit():
-            code = "0" + code[2:]
-        elif code.startswith("SZ") and code[2:].isdigit():
-            code = "1" + code[2:]
         super().__init__(
             code, value_label=value_label, fetch=fetch, save=save, path=path, form=form
         )
@@ -1145,10 +1378,11 @@ class mfundinfo(basicinfo):
         path="",
         form="csv",
     ):
-        self._url = "http://fund.eastmoney.com/pingzhongdata/" + code + ".js"
-        self.rate = 0
         if code.startswith("M") and code[1:].isdigit():
             code = code[1:]
+        code = code.zfill(6)
+        self._url = "http://fund.eastmoney.com/pingzhongdata/" + code + ".js"
+        self.rate = 0
         super().__init__(
             code,
             fetch=fetch,
@@ -1163,7 +1397,6 @@ class mfundinfo(basicinfo):
         self._page = rget(self._url)
         if self._page.text[:800].find("Data_fundSharesPositions") >= 0:
             raise FundTypeError("This code seems to be a fund, use fundinfo instead")
-
         l = eval(
             re.match(
                 r"[\s\S]*Data_millionCopiesIncome = ([^;]*);[\s\S]*", self._page.text
@@ -1282,7 +1515,7 @@ class mfundinfo(basicinfo):
         con = rget(self._updateurl)
         soup = BeautifulSoup(con.text, "lxml")
         items = soup.findAll("td")
-        if dt.datetime.strptime(str(items[0].string), "%Y-%m-%d") == today():
+        if dt.datetime.strptime(str(items[0].string), "%Y-%m-%d") == today_obj():
             diffdays += 1
         if diffdays <= 10:
             # caution: there may be today data!! then a day gap will be in table

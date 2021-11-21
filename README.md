@@ -7,11 +7,13 @@ xalpha
 [![codecov](https://codecov.io/gh/refraction-ray/xalpha/branch/master/graph/badge.svg)](https://codecov.io/gh/refraction-ray/xalpha)
 [![license](https://img.shields.io/:license-mit-blue.svg)](https://badges.mit-license.org/)
 
-**国内基金投资的全流程管理**
+**基金投资的全流程管理**
 
 场外基金的信息与净值获取，精确到分的投资账户记录整合分析与丰富可视化，简单的策略回测以及根据预设策略的定时投资提醒。尤其适合资金反复进出的定投型和网格型投资的概览与管理分析。
 
-🎉 最新版本支持通用日线和实时数据获取器，统一接口一行可以获得几乎任何市场上存在产品的价格数据，进行分析。
+🎉 0.3 版本起支持通用日线和实时数据获取器，统一接口一行可以获得几乎任何市场上存在产品的价格数据，进行分析。
+
+🍭 0.9 版本起支持持仓基金组合的底层持仓配置和股票细节透视，掌握底层持仓和跟踪机构股票池与买卖特点，从未如此简单。
 
 一行拿到基金信息：
 
@@ -22,9 +24,10 @@ nfyy = xa.fundinfo("501018")
 一行根据账单进行基金组合全模拟，和实盘完全相符:
 
 ```python
-jiaoyidan = xa.record(path).status # 额外一行先读入 path 处的 csv 账单
-shipan = xa.mul(jiaoyidan) # Let's rock
-shipan.combsummary() # 看所有基金总结效果
+jiaoyidan = xa.record(path) # 额外一行先读入 path 处的 csv 账单
+shipan = xa.mul(status=jiaoyidan) # Let's rock
+shipan.summary() # 看所有基金总结效果
+shipan.get_stock_holdings() # 查看底层等效股票持仓
 ```
 
 一行获取各种金融产品的历史日线数据或实时数据
@@ -36,14 +39,27 @@ xa.get_rt("commodities/crude-oil") # 原油期货实时数据
 xa.get_rt("HK00700", double_check=True) # 双重验证高稳定性支持的实时数据
 ```
 
-一行拿到指数的历史估值和即时估值分析（需要聚宽数据，本地试用申请或直接在聚宽云平台运行）
+一行拿到指数，行业，基金和个股的历史估值和即时估值分析（指数部分需要聚宽数据，本地试用申请或直接在聚宽云平台运行）
+
 ```python
 xa.PEBHistory("SH000990").summary()
+xa.PEBHistory("F100032").v()
+```
+
+一行定价可转债
+
+```python
+xa.CBCalculator("SH113577").analyse()
+```
+
+一行估算基金净值 (QDII 基金需自己提供持仓字典)
+
+```python
+xa.QDIIPredict("SH501018", positions=True).get_t0_rate()
 ```
 
 xalpha 不止如此，更多特性，欢迎探索。不只是数据，更是工具！
 
-您也可以尝试基于 xalpha 构建的基金净值预测与场内溢价率提醒的项目: [LOF-BOT](https://github.com/refraction-ray/lof-bot).
 
 ## 文档
 
@@ -78,6 +94,16 @@ $ cd xalpha && python3 setup.py install
 
 由于丰富的可视化支持，建议配合 Jupyter Notebook 使用。可以参照[这里](https://xalpha.readthedocs.io/en/latest/demo.html)给出的示例连接，快速掌握大部分功能。
 
+部分效果如下：
+
+<img src="doc/source/kline.png" width="90%">
+
+<img src="doc/source/tradecost.png" width="90%">
+
+<img src="doc/source/positions.png" width="80%">
+
+
+
 ### 在量化平台使用
 
 这里以聚宽为例，打开聚宽研究环境的 jupyter notebook，运行以下命令：
@@ -102,6 +128,10 @@ $ cd xalpha && python3 setup.py install
 ```
 
 由于 xalpha 整合了部分聚宽数据源的 API，在云端直接 ``xa.provider.set_jq_data(debug=True)`` 即可激活聚宽数据源。
+
+## 致谢
+
+感谢[集思录](https://www.jisilu.cn)对本项目的支持和赞助，可以在[这里](https://www.jisilu.cn/data/qdii/#qdiie)查看基于 xalpha 引擎构建的 QDII 基金净值预测。
 
 ## 博客
 

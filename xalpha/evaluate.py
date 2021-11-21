@@ -17,7 +17,7 @@ class evaluate:
     :param fundobjs: info object，或者如前所述一切具有 price 表的对象
     :param start: date string or object, 比较的起始时间，默认使用所有 price 表中最近的起始时间。
         但需要注意，由于拉取的基金净值表，往往在开始几天缺失净值数据，即使使用默认时间也可能无法对齐所有净值数据。
-        因此建议手动设置起始时间到最近的起始时间一周后左右。 
+        因此建议手动设置起始时间到最近的起始时间一周后左右。
     """
 
     def __init__(self, *fundobjs, start=None):
@@ -50,7 +50,7 @@ class evaluate:
             if col != "date":
                 self.totprice[col] = self.totprice[col] / self.totprice[col].iloc[0]
 
-    def v_netvalue(self, end=yesterdayobj(), vopts=None):
+    def v_netvalue(self, end=yesterdayobj(), vopts=None, rendered=True):
         """
         起点对齐归一的，各参考基金或指数的净值比较可视化
 
@@ -72,7 +72,10 @@ class evaluate:
                 y_axis=list(partprice[fund.code]),
                 is_symbol_show=False,
             )
-        return line.render_notebook()
+        if rendered:
+            return line.render_notebook()
+        else:
+            return line
 
     def correlation_table(self, end=yesterdayobj()):
         """
@@ -85,7 +88,7 @@ class evaluate:
         covtable = partprice.iloc[:, 1:].pct_change().corr()
         return covtable
 
-    def v_correlation(self, end=yesterdayobj(), vopts=None):
+    def v_correlation(self, end=yesterdayobj(), vopts=None, rendered=True):
         """
         各基金净值的相关程度热力图可视化
 
@@ -105,5 +108,7 @@ class evaluate:
         if vopts is None:
             vopts = heatmap_opts
         heatmap.set_global_opts(**vopts)
-
-        return heatmap.render_notebook()
+        if rendered:
+            return heatmap.render_notebook()
+        else:
+            return heatmap
