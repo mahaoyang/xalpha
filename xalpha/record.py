@@ -2,6 +2,7 @@
 """
 module for status table IO
 """
+
 import pandas as pd
 
 from xalpha.cons import convert_date, yesterdayobj
@@ -110,7 +111,7 @@ class record:
                 row.append(-ratio)
             else:
                 row.append(date)
-        s = s.append(pd.DataFrame([row], columns=s.columns), ignore_index=True)
+        s = pd.concat([s, pd.DataFrame([row], columns=s.columns)], ignore_index=True)
         self.status = s
 
     def save_csv(self, path=None, index=False, **tocsvkwds):

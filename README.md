@@ -1,15 +1,13 @@
-xalpha
-========
+# xalpha
 
 [![version](https://img.shields.io/pypi/v/xalpha.svg)](https://pypi.org/project/xalpha/)
-[![doc](https://readthedocs.org/projects/xalpha/badge/?style=flat)](https://xalpha.readthedocs.io/) 	
-[![Travis](https://api.travis-ci.org/refraction-ray/xalpha.svg)](https://travis-ci.org/refraction-ray/xalpha)
+[![doc](https://readthedocs.org/projects/xalpha/badge/?style=flat)](https://xalpha.readthedocs.io/)
 [![codecov](https://codecov.io/gh/refraction-ray/xalpha/branch/master/graph/badge.svg)](https://codecov.io/gh/refraction-ray/xalpha)
 [![license](https://img.shields.io/:license-mit-blue.svg)](https://badges.mit-license.org/)
 
 **基金投资的全流程管理**
 
-场外基金的信息与净值获取，精确到分的投资账户记录整合分析与丰富可视化，简单的策略回测以及根据预设策略的定时投资提醒。尤其适合资金反复进出的定投型和网格型投资的概览与管理分析。
+基金股票信息与净值获取，精确到分的投资账户记录整合分析与丰富可视化，简单的策略回测以及根据预设策略的定时投资提醒。尤其适合资金反复进出的定投型和网格型投资的概览与管理分析。[AI agent 原生支持](https://xalpha.readthedocs.io/en/latest/xalpha_agent/index.html)。
 
 🎉 0.3 版本起支持通用日线和实时数据获取器，统一接口一行可以获得几乎任何市场上存在产品的价格数据，进行分析。
 
@@ -52,18 +50,17 @@ xa.PEBHistory("F100032").v()
 xa.CBCalculator("SH113577").analyse()
 ```
 
-一行估算基金净值 (QDII 基金需自己提供持仓字典)
+一行估算基金净值 (支持核心 QDII 基金 T-1 以及基于期货的 T-0 实时净值预测)
 
-```python
-xa.QDIIPredict("SH501018", positions=True).get_t0_rate()
-```
+ ```python
+ xa.QDIIPredict("SH501018", positions=True).get_t0_rate()
+ ```
 
 xalpha 不止如此，更多特性，欢迎探索。不只是数据，更是工具！
 
-
 ## 文档
 
-在线文档地址： https://xalpha.readthedocs.io/ 
+在线文档地址： https://xalpha.readthedocs.io/
 
 或者通过以下命令，在本地`doc/build/html`内阅读文档。
 
@@ -71,7 +68,6 @@ xalpha 不止如此，更多特性，欢迎探索。不只是数据，更是工�
 $ cd doc
 $ make html
 ```
-
 
 ## 安装
 
@@ -85,7 +81,7 @@ pip install xalpha
 
 ```bash
 $ git clone https://github.com/refraction-ray/xalpha.git
-$ cd xalpha && python3 setup.py install
+$ cd xalpha && pip3 install .
 ```
 
 ## 用法
@@ -94,15 +90,21 @@ $ cd xalpha && python3 setup.py install
 
 由于丰富的可视化支持，建议配合 Jupyter Notebook 使用。可以参照[这里](https://xalpha.readthedocs.io/en/latest/demo.html)给出的示例连接，快速掌握大部分功能。
 
-部分效果如下：
+**支持多市场指数与个股的 K 线及历史估值可视化分析：**
 
 <img src="doc/source/kline.png" width="90%">
 
+**基于底层数据的投资账户历史净值与各基金成本偏离度分析：**
+
 <img src="doc/source/tradecost.png" width="90%">
 
+**核心 QDII 基金的 T-1 净值预测及基于期货的 T-0 实时净值仪表盘：**
+
+<img src="doc/source/qdii_dashboard.png" width="90%">
+
+**自动穿透持仓，获取基金组合底层的等效股票集中度及行业分布：**
+
 <img src="doc/source/positions.png" width="80%">
-
-
 
 ### 在量化平台使用
 
@@ -127,14 +129,19 @@ $ cd xalpha && python3 setup.py install
 >>> import xalpha as xa
 ```
 
-由于 xalpha 整合了部分聚宽数据源的 API，在云端直接 ``xa.provider.set_jq_data(debug=True)`` 即可激活聚宽数据源。
+由于 xalpha 整合了部分聚宽数据源的 API，在云端直接 `xa.provider.set_jq_data(debug=True)` 即可激活聚宽数据源。
 
 ## 致谢
 
-感谢[集思录](https://www.jisilu.cn)对本项目的支持和赞助，可以在[这里](https://www.jisilu.cn/data/qdii/#qdiie)查看基于 xalpha 引擎构建的 QDII 基金净值预测。
+感谢[集思录](https://www.jisilu.cn)对本项目的支持和赞助，可以在[这里](https://www.jisilu.cn/data/qdii/#qdiie)查看基于 xalpha 引擎构建的 QDII 基金净值预测 (2026.3 合规原因下架)。
+
+## 免责声明
+
+本项目仅提供获取公开数据的示例代码，不提供任何数据存储和服务。
+软件用户需自行遵守相关网站的使用条款及法律法规。
 
 ## 博客
 
-* [xalpha 诞生记](https://re-ra.xyz/xalpha-%E8%AF%9E%E7%94%9F%E8%AE%B0/)
+- [xalpha 诞生记](https://re-ra.xyz/xalpha-%E8%AF%9E%E7%94%9F%E8%AE%B0/)
 
-* [xalpha 设计哲学及其他](https://re-ra.xyz/xalpha-%E8%AE%BE%E8%AE%A1%E5%93%B2%E5%AD%A6%E5%8F%8A%E5%85%B6%E4%BB%96/)
+- [xalpha 设计哲学及其他](https://re-ra.xyz/xalpha-%E8%AE%BE%E8%AE%A1%E5%93%B2%E5%AD%A6%E5%8F%8A%E5%85%B6%E4%BB%96/)

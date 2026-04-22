@@ -112,8 +112,7 @@ for c in nonqdiis:
         print(e.reason)
 df = pd.DataFrame(data)
 
-htmlstr = (
-    """<html>
+htmlstr = """<html>
 <meta charset="UTF-8">
 
 <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.10.20/css/jquery.dataTables.css">
@@ -137,10 +136,7 @@ htmlstr = (
     #df tbody tr:hover {
     background-color: #ffff99;
     }
-</style>"""
-    + df.to_html(table_id="df", index=False)
-    + "</html>"
-)
+</style>""" + df.to_html(table_id="df", index=False) + "</html>"
 
 
 with open("demo.html", "w") as f:

@@ -16,9 +16,9 @@ for f in excludes:
 
 setuptools.setup(
     name="xalpha",
-    version="0.11.4",
+    version="0.12.3",
     author="refraction-ray",
-    author_email="refraction-ray@protonmail.com",
+    author_email="znfesnpbh@gmail.com",
     description="all about fund investment",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -29,11 +29,12 @@ setuptools.setup(
         "lxml",
         "pandas",
         "xlrd>=1.0.0",  #  read excel support
-        "numpy",
+        "numpy<2.0",
         "scipy",
         "matplotlib",
         "requests",
-        "pyecharts==1.7.1",  # broken api between 0.x and 1.x
+        "pyecharts==1.7.1;python_version<='3.9'",  # broken api between 0.x and 1.x
+        "pyecharts==1.9.1;python_version>'3.9'",
         "beautifulsoup4>=4.9.0",
         "sqlalchemy",
         "pysocks",  # sock5 proxy support

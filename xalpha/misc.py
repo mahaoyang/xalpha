@@ -3,23 +3,24 @@
 modules for misc crawler without unfied API
 """
 
-import re
-import pandas as pd
 import datetime as dt
 import logging
-import numpy as np
-from bs4 import BeautifulSoup
+import re
 from functools import lru_cache
+
+import numpy as np
+import pandas as pd
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 from xalpha.cons import (
     rget,
-    rpost,
     rget_json,
     rpost_json,
     today_obj,
     region_trans,
+    holidays,
     _float,
 )
 from xalpha.universal import lru_cache_time
@@ -124,16 +125,25 @@ def get_sz_status(category="cb", date=None):
         df["未转股数量"] = df["kzsl"]
         df["未转股比例"] = df["kzbl"]
         df["转股截止日期"] = pd.to_datetime(df["kzzzrq"])
-        df = df[["证券代码", "证券简称", "上市日期", "发行量", "换股价格", "未转股数量", "未转股比例", "转股截止日期"]]
+        df = df[
+            [
+                "证券代码",
+                "证券简称",
+                "上市日期",
+                "发行量",
+                "换股价格",
+                "未转股数量",
+                "未转股比例",
+                "转股截止日期",
+            ]
+        ]
         return df
 
 
 @lru_cache_time(ttl=7200, maxsize=512)
 def get_sz_fs(code):
     url = "http://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&\
-CATALOGID=1945_LOF&txtQueryKeyAndJC={code}".format(
-        code=code
-    )
+CATALOGID=1945_LOF&txtQueryKeyAndJC={code}".format(code=code)
     r = rget_json(url)
     return _float(r[0]["data"][0]["dqgm"]) * 1e4
 
@@ -154,7 +164,7 @@ def get_tdx_holidays(holidays=None, format="%Y-%m-%d"):
                 tstr = tobj.strftime(format)
                 if rg not in holidays:
                     holidays[rg] = [tstr]
-                else:
+                elif tstr not in holidays[rg]:
                     holidays[rg].append(tstr)
     return holidays
 
@@ -214,9 +224,7 @@ def get_fund_list(ft):
     # hh, zq, zs, gp, qdii, fof
     r = rget(
         "http://fund.eastmoney.com/data/FundGuideapi.aspx?\
-dt=0&ft={ft}&sd=&ed=&sc=z&st=desc&pi=1&pn=10000&zf=diy&sh=list".format(
-            ft=ft
-        ),
+dt=0&ft={ft}&sd=&ed=&sc=z&st=desc&pi=1&pn=10000&zf=diy&sh=list".format(ft=ft),
         headers={
             "Host": "fund.eastmoney.com",
             "Referer": "http://fund.eastmoney.com/daogou/",
@@ -224,6 +232,29 @@ dt=0&ft={ft}&sd=&ed=&sc=z&st=desc&pi=1&pn=10000&zf=diy&sh=list".format(
     )
     d = eval(r.text.split("=")[1].replace("null", "None"))
     return [code.split(",")[0] for code in d["datas"] if code.strip()]
+
+
+def update_caldate(path, year, path_out=None):
+    """
+    Update caldate.csv based on ``cons.holidays["CN"]``
+    """
+    r = {"cal_date": [], "is_open": []}
+    for d in pd.date_range(str(year) + "-01-01", str(year) + "-12-31"):
+        r["cal_date"].append(d.strftime("%Y-%m-%d"))
+        if d.weekday() in [5, 6]:
+            r["is_open"].append(0)
+        elif d.strftime("%Y-%m-%d") in holidays["CN"]:
+            r["is_open"].append(0)
+        else:
+            r["is_open"].append(1)
+    ncal = pd.DataFrame(r)
+    cal = pd.read_csv(path)
+    if int(year) <= int(cal.iloc[-1]["cal_date"][:4]):
+        raise ValueError("We already have cal date for year %s" % year)
+    tcal = pd.concat([cal, ncal], ignore_index=True)
+    if path_out is None:
+        path_out = path
+    tcal.to_csv(path_out, index=False)
 
 
 ## 常见标的合集列表，便于共同分析, 欢迎贡献:)
@@ -279,7 +310,14 @@ def summary_cb(df, l=None, cutoff=5):
     if l is not None:
         df = df[df["转债代码"].isin(l)]
     d = {}
-    for c in ["老式双低", "转债价格", "转股溢价率", "价值溢价", "税后收益率", "股票市值"]:
+    for c in [
+        "老式双低",
+        "转债价格",
+        "转股溢价率",
+        "价值溢价",
+        "税后收益率",
+        "股票市值",
+    ]:
         if cutoff == 0:
             yj = sorted(df[c])
         else:

@@ -1,12 +1,16 @@
-import sys
-
-sys.path.insert(0, "../")
+import os
 import xalpha as xa
 from xalpha.exceptions import FundTypeError
 import pandas as pd
 import pytest
 
-ioconf = {"save": True, "fetch": True, "path": "pytest", "form": "csv"}
+HERE = os.path.dirname(os.path.abspath(__file__))
+ioconf = {
+    "save": True,
+    "fetch": True,
+    "path": os.path.join(HERE, "pytest"),
+    "form": "csv",
+}
 ca = xa.cashinfo(interest=0.0002, start="2015-01-01")
 zzhb = xa.indexinfo("0000827", **ioconf)
 hs300 = xa.fundinfo("000311")
@@ -39,6 +43,7 @@ def test_cash():
     assert round(ca.total_annualized_returns("2018-01-01"), 4) == 0.0757
 
 
+# @pytest.mark.skip(reason="disable indexinfo currently")
 def test_index():
     assert (
         round(zzhb.price[zzhb.price["date"] == "2012-02-01"].iloc[0].totvalue, 3)
@@ -88,11 +93,14 @@ def test_index():
 
 def test_fund():
     assert hs300.round_label == 1
-    assert hs300.name == "景顺长城沪深300指数增强"  ## "景顺长城沪深300增强", 蜜汁改名。。。
+    assert (
+        hs300.name == "景顺长城沪深300指数增强A"
+    )  ## "景顺长城沪深300增强", 蜜汁改名。。。
     assert hs300.fenhongdate[1] == pd.Timestamp("2017-08-15")
     assert hs300.get_holdings(2019, 4).iloc[0]["name"] == "中国平安"
     assert (
-        float(hs300.special[hs300.special["date"] == "2017-08-04"]["comment"]) == 0.19
+        float(hs300.special[hs300.special["date"] == "2017-08-04"].iloc[0]["comment"])
+        == 0.19
     )
     hs300.rate = 0.12
     hs300.segment = [[0, 7], [7, 365], [365, 730], [730]]
@@ -156,6 +164,7 @@ def delete_csvlines(path, lines=5):
     df.to_csv(path, index=False)
 
 
+@pytest.mark.local
 def test_csvio():
     hs300 = xa.fundinfo("000311", **ioconf)
     len1 = len(hs300.price)
@@ -180,6 +189,7 @@ def test_csvio():
     )
 
 
+@pytest.mark.local
 def test_fund_update():
     zghl = xa.fundinfo(
         "501029", **ioconf
@@ -212,4 +222,12 @@ def test_vinfo():
     t.dailyreport()
     assert len(t.cftable) == 2
     # yy = xa.vinfo("ZZ931152") # fail on oversea server
-    hs300.pct_chg()
+
+
+@pytest.mark.local
+def test_purchase_status():
+    codes = ["161129", "164824", "000311"]
+    for code in codes:
+        f = xa.fundinfo(code)
+        print(f"\nFund {code} ({f.name}) Purchase Status: {f.purchase_status}")
+        assert f.purchase_status != "未知"

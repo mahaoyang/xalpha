@@ -4,16 +4,17 @@ basic constants and utility functions
 """
 
 import datetime as dt
+import inspect
+import json
+import logging
 import os
 import time
-import logging
-import inspect
 from decimal import Decimal
-import requests
 from functools import wraps
-from simplejson.errors import JSONDecodeError
 
 import pandas as pd
+import requests
+from simplejson.errors import JSONDecodeError
 from pyecharts.options import (
     AxisOpts,
     DataZoomOpts,
@@ -56,10 +57,15 @@ yesterdaydash = lambda: dt.datetime.strftime(yesterdayobj(), "%Y-%m-%d")
 
 
 # list: all the trade date of domestic stock market in the form of string
+# update per year by ``xa.misc.update_caldate("xalpha/caldate.csv", "2023")``
 caldate = pd.read_csv(os.path.join(__path__[0], "caldate.csv"))
+# data source
+# pro = ts.pro_api()
+# df = pro.trade_cal(exchange='', start_date='20230101', end_date='20231231')
 opendate = list(caldate[caldate["is_open"] == 1]["cal_date"])
 # opendate = list(ts.trade_cal()[ts.trade_cal()['isOpen']==1]['calendarDate'])
 opendate_set = set(opendate)  # for speed checking?
+opendate_dt = pd.to_datetime(opendate)
 
 # fund code list which always round down for the purchase share approximation
 droplist = ["003318", "000311", "000601", "009989"]
@@ -71,11 +77,13 @@ def calendar_selfcheck():
     # 国内链接 githubusercontent.com 大概率存在问题，因此设计成联网自动更新日历大概率无用。
     # 也许之后考虑一些较稳定的第三方资源托管服务
     current_year = dt.datetime.now().year
-    if str(current_year) != opendate[-1][:4]:
+    if int(opendate[-1][:4]) < current_year:
         logger.warning(
             "Please update xalpha via `pip install -U xalpha` to keep the trade calendar up-to-date"
         )
-        print("请更新 xalpha 版本以更新最新年份的 A 股交易日历, 否则将可能无法正确获取和处理最新的基金净值")
+        print(
+            "请更新 xalpha 版本以更新最新年份的 A 股交易日历, 否则将可能无法正确获取和处理最新的基金净值"
+        )
 
 
 calendar_selfcheck()
@@ -100,349 +108,6 @@ region_trans = {
     "中国台湾": "TW",
 }
 
-# extract from xa.misc.get_tdx_holidays
-holidays = {
-    "AU": [
-        "2020-01-01",
-        "2020-01-27",
-        "2020-04-10",
-        "2020-04-13",
-        "2020-04-25",
-        "2020-06-08",
-        "2020-12-24",
-        "2020-12-25",
-        "2020-12-28",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-01-26",
-        "2021-04-02",
-        "2021-04-05",
-        "2021-06-14",
-        "2021-12-24",
-        "2021-12-27",
-        "2021-12-28",
-        "2021-12-31",
-    ],
-    "CH": [
-        "2020-01-01",
-        "2020-01-02",
-        "2020-04-10",
-        "2020-04-13",
-        "2020-05-01",
-        "2020-05-21",
-        "2020-06-01",
-        "2020-12-24",
-        "2020-12-25",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-04-02",
-        "2021-04-05",
-        "2021-05-13",
-        "2021-05-24",
-        "2021-12-24",
-        "2021-12-31",
-    ],
-    "CN": [
-        "2020-01-01",
-        "2020-01-24",
-        "2020-01-27",
-        "2020-01-28",
-        "2020-01-29",
-        "2020-01-30",
-        "2020-01-31",
-        "2020-04-06",
-        "2020-05-01",
-        "2020-05-04",
-        "2020-05-05",
-        "2020-06-25",
-        "2020-06-26",
-        "2020-10-01",
-        "2020-10-02",
-        "2020-10-05",
-        "2020-10-06",
-        "2020-10-07",
-        "2020-10-08",
-        "2021-01-01",
-        "2021-02-11",
-        "2021-02-12",
-        "2021-02-15",
-        "2021-02-16",
-        "2021-02-17",
-        "2021-04-05",
-        "2021-05-03",
-        "2021-05-04",
-        "2021-05-05",
-        "2021-06-14",
-        "2021-09-20",
-        "2021-09-21",
-        "2021-10-01",
-        "2021-10-04",
-        "2021-10-05",
-        "2021-10-06",
-        "2021-10-07",
-    ],
-    "DE": [
-        "2020-01-01",
-        "2020-04-10",
-        "2020-04-13",
-        "2020-05-01",
-        "2020-06-01",
-        "2020-12-24",
-        "2020-12-25",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-04-02",
-        "2021-04-05",
-        "2021-05-24",
-        "2021-12-24",
-        "2021-12-31",
-    ],
-    "FR": [
-        "2020-01-01",
-        "2020-04-10",
-        "2020-04-13",
-        "2020-05-01",
-        "2020-12-24",
-        "2020-12-25",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-04-02",
-        "2021-04-05",
-        "2021-12-24",
-        "2021-12-31",
-    ],
-    "HK": [
-        "2020-01-01",
-        "2020-01-27",
-        "2020-01-28",
-        "2020-04-10",
-        "2020-04-13",
-        "2020-04-30",
-        "2020-05-01",
-        "2020-06-25",
-        "2020-07-01",
-        "2020-10-01",
-        "2020-10-02",
-        "2020-10-26",
-        "2020-12-25",
-        "2021-01-01",
-        "2021-02-11",
-        "2021-02-12",
-        "2021-02-15",
-        "2021-04-02",
-        "2021-04-05",
-        "2021-04-06",
-        "2021-05-19",
-        "2021-06-14",
-        "2021-07-01",
-        "2021-09-22",
-        "2021-10-01",
-        "2021-10-14",
-        "2021-12-24",
-        "2021-12-27",
-        "2021-12-31",
-    ],
-    "IN": [
-        "2020-02-21",
-        "2020-03-10",
-        "2020-04-02",
-        "2020-04-06",
-        "2020-04-10",
-        "2020-04-14",
-        "2020-05-01",
-        "2020-05-25",
-        "2020-10-02",
-        "2020-11-16",
-        "2020-11-30",
-        "2020-12-25",
-        "2021-01-26",
-        "2021-03-11",
-        "2021-03-29",
-        "2021-04-02",
-        "2021-04-14",
-        "2021-04-21",
-        "2021-05-13",
-        "2021-07-20",
-        "2021-08-19",
-        "2021-09-10",
-        "2021-10-15",
-        "2021-11-04",
-        "2021-11-19",
-    ],
-    "JP": [
-        "2020-01-01",
-        "2020-01-02",
-        "2020-01-03",
-        "2020-01-13",
-        "2020-02-11",
-        "2020-02-24",
-        "2020-03-20",
-        "2020-04-29",
-        "2020-05-04",
-        "2020-05-05",
-        "2020-05-06",
-        "2020-07-23",
-        "2020-07-24",
-        "2020-08-10",
-        "2020-09-21",
-        "2020-09-22",
-        "2020-11-03",
-        "2020-11-23",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-01-11",
-        "2021-02-11",
-        "2021-02-23",
-        "2021-04-29",
-        "2021-05-03",
-        "2021-05-04",
-        "2021-05-05",
-        "2021-07-22",
-        "2021-07-23",
-        "2021-08-09",
-        "2021-09-20",
-        "2021-09-23",
-        "2021-11-03",
-        "2021-11-23",
-        "2021-12-31",
-    ],
-    "KR": [
-        "2020-01-01",
-        "2020-01-24",
-        "2020-01-27",
-        "2020-04-30",
-        "2020-05-01",
-        "2020-05-05",
-        "2020-09-30",
-        "2020-10-01",
-        "2020-10-02",
-        "2020-10-09",
-        "2020-12-25",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-02-11",
-        "2021-02-12",
-        "2021-03-01",
-        "2021-05-05",
-        "2021-05-19",
-        "2021-09-20",
-        "2021-09-21",
-        "2021-09-22",
-        "2021-12-31",
-    ],
-    "SG": [
-        "2020-01-01",
-        "2020-01-24",
-        "2020-04-10",
-        "2020-05-01",
-        "2020-05-07",
-        "2020-05-21",
-        "2020-07-31",
-        "2020-08-10",
-        "2020-12-24",
-        "2020-12-25",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-02-11",
-        "2021-02-12",
-        "2021-04-02",
-        "2021-05-13",
-        "2021-05-26",
-        "2021-07-20",
-        "2021-08-09",
-        "2021-11-04",
-        "2021-12-24",
-        "2021-12-31",
-    ],
-    "TW": [
-        "2020-01-01",
-        "2020-01-21",
-        "2020-01-22",
-        "2020-01-23",
-        "2020-01-24",
-        "2020-01-27",
-        "2020-01-28",
-        "2020-01-29",
-        "2020-02-28",
-        "2020-04-02",
-        "2020-04-03",
-        "2020-05-01",
-        "2020-06-25",
-        "2020-06-26",
-        "2020-10-01",
-        "2020-10-02",
-        "2020-10-09",
-        "2021-01-01",
-        "2021-02-08",
-        "2021-02-09",
-        "2021-02-10",
-        "2021-02-11",
-        "2021-02-12",
-        "2021-02-15",
-        "2021-02-16",
-        "2021-03-01",
-        "2021-04-02",
-        "2021-04-05",
-        "2021-04-30",
-        "2021-06-14",
-        "2021-09-20",
-        "2021-09-21",
-        "2021-10-11",
-        "2021-12-31",
-    ],
-    "UK": [
-        "2020-01-01",
-        "2020-04-10",
-        "2020-04-13",
-        "2020-05-08",
-        "2020-05-25",
-        "2020-08-31",
-        "2020-12-24",
-        "2020-12-25",
-        "2020-12-28",
-        "2020-12-31",
-        "2021-01-01",
-        "2021-01-01",
-        "2021-04-02",
-        "2021-04-05",
-        "2021-05-03",
-        "2021-05-31",
-        "2021-08-30",
-        "2021-12-24",
-        "2021-12-27",
-        "2021-12-28",
-        "2021-12-31",
-        "2022-01-03",
-    ],
-    "US": [
-        "2020-01-01",
-        "2020-01-20",
-        "2020-02-17",
-        "2020-03-08",
-        "2020-04-10",
-        "2020-05-25",
-        "2020-07-03",
-        "2020-09-07",
-        "2020-11-01",
-        "2020-11-26",
-        "2020-11-27",
-        "2020-12-24",
-        "2020-12-25",
-        "2021-01-01",
-        "2021-01-01",
-        "2021-01-18",
-        "2021-02-15",
-        "2021-03-14",
-        "2021-04-02",
-        "2021-05-31",
-        "2021-07-05",
-        "2021-09-06",
-        "2021-11-07",
-        "2021-11-25",
-        "2021-11-26",
-        "2021-12-24",
-    ],
-}
 
 connection_errors = (
     HttpStatusError,
@@ -538,6 +203,18 @@ def myround(num, label=1):
     return res
 
 
+def pd_to_datetime(target, **kwargs):
+    """
+    version aware pd.to_datetime, use format="mixed" for pandas >= 2.0
+    """
+    if pd.__version__[0] == "1":
+        return pd.to_datetime(target, **kwargs)
+    else:
+        if "format" not in kwargs:
+            kwargs["format"] = "mixed"
+        return pd.to_datetime(target, **kwargs)
+
+
 def convert_date(date):
     """
     convert date into datetime object
@@ -546,9 +223,47 @@ def convert_date(date):
     :returns: corresponding datetime object
     """
     if isinstance(date, str):
-        return pd.Timestamp(date)
+        return pd_to_datetime(date)
+    return date
+
+
+def pd_get_week(series):
+    """
+    version aware week getting for pandas series
+    """
+    if pd.__version__[0] == "1":
+        return series.dt.week
     else:
-        return date
+        return series.dt.isocalendar().week
+
+
+_FREQ_SUPPORT_CACHE = {}
+
+
+def pd_valid_freq(freq):
+    """
+    version aware frequency string for pandas date_range.
+    Converts modern aliases like 'ME', 'QE', 'YE' to legacy 'M', 'Q', 'Y' on unsupported pandas versions.
+    """
+    if freq is None or not isinstance(freq, str):
+        return freq
+
+    global _FREQ_SUPPORT_CACHE
+    mapping = {"ME": "M", "QE": "Q", "YE": "Y"}
+
+    for k, v in mapping.items():
+        if k in freq:
+            if k not in _FREQ_SUPPORT_CACHE:
+                try:
+                    pd.date_range("2020-01-01", periods=1, freq=k)
+                    _FREQ_SUPPORT_CACHE[k] = True
+                except ValueError:
+                    _FREQ_SUPPORT_CACHE[k] = False
+
+            if not _FREQ_SUPPORT_CACHE[k]:
+                freq = freq.replace(k, v)
+
+    return freq
 
 
 def _date_check(dtobj, check=False):
@@ -642,8 +357,8 @@ def reconnect(tries=5, timeout=12):
 
             if getattr(xp, "proxy", None):
                 kws["proxies"] = {"http": xp.proxy, "https": xp.proxy}
-                kws["timeout"] = timeout
                 logger.debug("Using proxy %s" % xp.proxy)
+            kws["timeout"] = timeout
             if args:
                 url = args[0]
             else:
@@ -673,7 +388,10 @@ def reconnect(tries=5, timeout=12):
                             "Still wrong at fetching url: %s. after %s tries."
                             % (url, tries)
                         )
-                        logger.error("Fails due to %s" % e.args[0])
+                        if e.args:
+                            logger.error("Fails due to %s" % e.args[0])
+                        else:
+                            logger.error("Fails due to %s" % str(e))
                         raise e
                     time.sleep(0.5 * count)
 
@@ -753,6 +471,9 @@ def rpost_json(*args, **kws):
 #                 raise e
 #             time.sleep(0.5*count)
 
+# extract from xa.misc.get_tdx_holidays
+with open(os.path.join(__path__[0], "holiday.json"), "r") as f:
+    holidays = json.load(f)
 
 ## simple subsitution for holdings.py
 

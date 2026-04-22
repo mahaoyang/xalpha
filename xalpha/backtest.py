@@ -5,13 +5,13 @@ modules for dynamical backtesting framework
 
 import pandas as pd
 
-from xalpha.info import fundinfo, mfundinfo
-from xalpha.trade import trade
+from xalpha.info import fundinfo, mfundinfo, cashinfo
+from xalpha.trade import trade, itrade
 from xalpha.multiple import mul, mulfix
 from xalpha.cons import yesterdayobj, avail_dates
 from xalpha.exceptions import TradeBehaviorError, FundTypeError
-from xalpha.cons import opendate_set, next_onday, convert_date
-from xalpha.universal import vinfo
+from xalpha.cons import opendate_set, convert_date
+from xalpha.universal import vinfo, get_daily
 
 
 class GlobalRegister:
@@ -92,7 +92,11 @@ class BTE:
         if self.trades:
             if totmoney is None:
                 totmoney = self.totmoney
-            return mulfix(*[v for _, v in self.trades.items()], totmoney=totmoney)
+            return mulfix(
+                *[v for _, v in self.trades.items()],
+                totmoney=totmoney,
+                cashobj=cashinfo(start=self.start),
+            )
         else:
             return
 
@@ -184,8 +188,11 @@ class BTE:
             remtable = self.trades[code].remtable
             remtable = remtable[remtable["date"] <= self.lastdates[code]]
             self.lastdates[code] = date
+            if is_value is False:
+                tdf = self.infos[code].price
+                value = value * tdf[tdf["date"] == date].iloc[0].netvalue
             df2 = pd.DataFrame([[date, value]], columns=["date", self.get_code(code)])
-            df = df.append(df2)
+            df = pd.concat([df, df2])
             self.trades[code] = trade(
                 self.infos[code],
                 df,
@@ -222,7 +229,7 @@ class BTE:
         self.lastdates[code] = date
         self.lastdates[code] = date
         df2 = pd.DataFrame([[date, -share]], columns=["date", self.get_code(code)])
-        df = df.append(df2)
+        df = pd.concat([df, df2])
         if is_value:
             self.set_fund(code, value_label=1)
         self.trades[code] = trade(
@@ -309,7 +316,9 @@ class ScheduledSellonXIRR(Scheduled):
                 except RuntimeError:
                     xirr = 0.0
                 if self.verbose:
-                    print(f"{date.strftime('%Y-%m-%d')} 内部年化收益率为 {round(xirr*100, 0)}%")
+                    print(
+                        f"{date.strftime('%Y-%m-%d')} 内部年化收益率为 {round(xirr*100, 0)}%"
+                    )
                 if xirr > self.threhold:
                     self.sold = True
                     self.sell(self.code, -0.005, date)
@@ -416,7 +425,10 @@ class Balance(BTE):
             df = sys.summary(date.strftime("%Y-%m-%d"))
             total_value = df[df["基金名称"] == "总计"]["基金现值"].iloc[0]
             for fund, ratio in self.portfolio_dict.items():
-                delta = df[df["基金代码"] == fund[1:]]["基金现值"].iloc[0] - total_value * ratio
+                delta = (
+                    df[df["基金代码"] == fund[1:]]["基金现值"].iloc[0]
+                    - total_value * ratio
+                )
                 if delta > 0:
                     share = round(
                         delta
@@ -424,6 +436,84 @@ class Balance(BTE):
                         / df[df["基金代码"] == fund[1:]]["当日净值"].iloc[0],
                         2,
                     )
-                    self.sell(fund, share, date)  # 赎回份额考虑赎回费估算为千五，会导致末态并非完全平衡
+                    self.sell(
+                        fund, share, date
+                    )  # 赎回份额考虑赎回费估算为千五，会导致末态并非完全平衡
                 elif delta < 0:
                     self.buy(fund, -delta, date)
+
+
+class Grid(BTE):
+    """
+    网格策略
+    """
+
+    def prepare(self):
+        self.df = get_daily(self.kws.get("code"), start=self.start.strftime("%Y%m%d"))
+        self.infos[self.kws.get("code")] = self.get_info(self.kws.get("code"))
+        self.prices = self.kws.get("prices")
+        self.inamount = self.kws.get("inamount")
+        self.outamount = self.kws.get("outamount")
+        self.pos = 0
+        self.cftable = pd.DataFrame([], columns=["date", "cash", "share"])
+
+    def run(self, date):
+        row = self.df[self.df["date"] == date]
+        high = row["high"].item()
+        low = row["low"].item()
+        for p in self.prices[self.pos + 1 :]:
+            if p > low:
+                p0 = p
+                if p0 > high:
+                    p0 = high
+                if self.verbose is True:
+                    print(
+                        f"buy {self.inamount[self.pos]} of {self.kws.get('code')} at {date} with value {p0}"
+                    )
+                self.cftable = pd.concat(
+                    [
+                        self.cftable,
+                        pd.DataFrame(
+                            [
+                                [
+                                    date,
+                                    -p0 * self.inamount[self.pos],
+                                    self.inamount[self.pos],
+                                ]
+                            ],
+                            columns=["date", "cash", "share"],
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+                self.pos += 1
+            else:
+                break
+        for p in self.prices[: self.pos][::-1]:
+            if p < high:
+                if self.verbose is True:
+                    print(
+                        f"sell {self.outamount[self.pos - 1]} of {self.kws.get('code')} at {date} with value {p}"
+                    )
+                self.cftable = pd.concat(
+                    [
+                        self.cftable,
+                        pd.DataFrame(
+                            [
+                                [
+                                    date,
+                                    p * self.outamount[self.pos - 1],
+                                    -self.outamount[self.pos - 1],
+                                ]
+                            ],
+                            columns=["date", "cash", "share"],
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+                self.pos -= 1
+            else:
+                break
+        self.trades[self.kws.get("code")] = itrade(
+            self.kws.get("code"), None, self.cftable
+        )

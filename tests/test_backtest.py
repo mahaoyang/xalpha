@@ -1,6 +1,3 @@
-import sys
-
-sys.path.insert(0, "../")
 import xalpha as xa
 import pandas as pd
 
@@ -27,7 +24,10 @@ def test_tendency():
 def test_balance():
     fundlist = ["002146", "001316", "001182"]
     portfolio_dict = {"F" + f: 1 / len(fundlist) for f in fundlist}
-    check_dates = pd.date_range("2019-01-01", "2020-08-01", freq="Q")
+
+    check_dates = pd.date_range(
+        "2019-01-01", "2020-08-01", freq=xa.cons.pd_valid_freq("QE")
+    )
     bt = xa.backtest.Balance(
         start=pd.Timestamp("2019-01-04"),
         totmoney=10000,
@@ -40,3 +40,30 @@ def test_balance():
     sys = bt.get_current_mul()
     sys.summary("2020-08-15")
     assert round(sys.xirrrate("2020-08-14"), 2) == 0.18
+
+
+def test_grid():
+    d = 0.95
+    shared = 1.05
+    prices = [0.9]
+    while prices[-1] > 0.45:
+        prices.append(prices[-1] * d)
+    inamount = [7000]
+    for i in range(len(prices) - 2):
+        inamount.append(inamount[-1] * shared)
+    outamount = [7000 * d]
+    for i in range(len(prices) - 2):
+        outamount.append(outamount[-1] * shared)
+
+    bt = xa.backtest.Grid(
+        start="20240101",
+        end="20241231",
+        code="SH512980",
+        prices=prices,
+        inamount=inamount,
+        outamount=outamount,
+    )
+    bt.backtest()
+    assert (
+        bt.get_current_mul().combsummary(date="20250103")["单位成本"].iloc[0] == 0.3751
+    )

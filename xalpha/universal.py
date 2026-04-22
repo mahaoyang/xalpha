@@ -4,19 +4,21 @@ modules for universal fetcher that gives historical daily data and realtime data
 for almost everything in the market
 """
 
+import datetime as dt
+import inspect
+import io
+import logging
 import os
 import sys
 import time
-import datetime as dt
+from functools import lru_cache, wraps
+from uuid import uuid4
+
 import numpy as np
 import pandas as pd
-import logging
-import inspect
 from bs4 import BeautifulSoup
-from functools import wraps, lru_cache
-from uuid import uuid4
-from sqlalchemy import exc
 from dateutil.relativedelta import relativedelta
+from sqlalchemy import exc
 
 try:
     from jqdatasdk import (
@@ -24,7 +26,6 @@ try:
         query,
         get_fundamentals,
         valuation,
-        get_query_count,
         finance,
         get_index_stocks,
         macro,
@@ -46,10 +47,11 @@ from xalpha.cons import (
     rget_json,
     rpost_json,
     tz_bj,
-    last_onday,
+    pd_to_datetime,
     region_trans,
     today_obj,
     _float,
+    last_onday,
 )
 from xalpha.provider import data_source
 from xalpha.exceptions import DataPossiblyWrong, ParserFailure
@@ -133,16 +135,29 @@ def lru_cache_time(ttl=None, maxsize=None):
     return wrapper
 
 
+tokens = {}
+
+
 # TODO: 缓存 token 的合适时间尺度
 @lru_cache_time(ttl=300)
-def get_token():
+def get_token(source="xq"):
     """
     获取雪球的验权 token，匿名也可获取，而且似乎永远恒定(大时间范围内会改变)
 
     :return:
     """
-    r = rget("https://xueqiu.com", headers={"user-agent": "Mozilla"})
-    return r.cookies["xq_a_token"]
+    if source in tokens:
+        return tokens[source]
+    if source in ["xq", "xueqiu"]:
+        r = rget("https://xueqiu.com/hq", headers={"user-agent": "Mozilla"})
+        return {"xq_a_token": r.cookies["xq_a_token"], "u": r.cookies["u"]}
+    else:
+        raise ValueError("`get_token` doesn't support %s source" % source)
+
+
+def set_token(key, source="xq"):
+    global tokens
+    tokens[source] = key
 
 
 def get_historical_fromxq(code, count, type_="before", full=False):
@@ -162,9 +177,14 @@ def get_historical_fromxq(code, count, type_="before", full=False):
         url.format(
             code=code, tomorrow=int(tomorrow_ts() * 1000), count=count, type_=type_
         ),
-        cookies={"xq_a_token": get_token()},
+        cookies=get_token(),
         headers={"user-agent": "Mozilla/5.0"},
     )
+    if not r.get("data") or r["data"].get("item") is None:
+        raise DataPossiblyWrong(
+            "Xueqiu API fails to return data for %s, check if the symbol is correct"
+            % code
+        )
     df = pd.DataFrame(data=r["data"]["item"], columns=r["data"]["column"])
     df["date"] = (df["timestamp"]).apply(ts2pdts)  # reset hours to zero
     return df
@@ -182,7 +202,7 @@ def get_industry_fromxq(code):
         "https://xueqiu.com/stock/industry/stockList.json?code=%s&type=1&size=100"
         % code
     )
-    r = rget_json(url, cookies={"xq_a_token": get_token()})
+    r = rget_json(url, cookies=get_token())
     return r
 
 
@@ -364,7 +384,7 @@ def get_rmb(start=None, end=None, prev=360, currency="USD/CNY"):
     if (currency[:3] in al) or (currency[4:] in bl):
         is_inverse = True
         currency = currency[4:] + "/" + currency[:3]
-    url = "http://www.chinamoney.com.cn/ags/ms/cm-u-bk-ccpr/CcprHisNew?startDate={start_str}&endDate={end_str}&currency={currency}&pageNum=1&pageSize=300"
+    url = "http://www.chinamoney.com.cn/ags/ms/cm-u-bk-ccpr/CcprHisNew?startDate={start_str}&endDate={end_str}&currency={currency}&pageNum=1&pageSize=30"
     if not end:
         end_obj = today_obj()
     else:
@@ -385,8 +405,8 @@ def get_rmb(start=None, end=None, prev=360, currency="USD/CNY"):
         "Host": "www.chinamoney.com.cn",
         "X-Requested-With": "XMLHttpRequest",
     }
-
-    if count <= 360:
+    segs = 30
+    if count <= segs:
         headers.update({"user-agent": _variate_ua()})
         r = rpost_json(
             url.format(start_str=start_str, end_str=end_str, currency=currency),
@@ -395,7 +415,7 @@ def get_rmb(start=None, end=None, prev=360, currency="USD/CNY"):
         rl.extend(r["records"])
     else:  # data more than 1 year cannot be fetched once due to API limitation
         sepo_obj = end_obj
-        sepn_obj = sepo_obj - dt.timedelta(360)
+        sepn_obj = sepo_obj - dt.timedelta(segs)
         #         sep0_obj = end_obj - dt.timedelta(361)
         while sepn_obj > start_obj:  # [sepn sepo]
             headers.update({"user-agent": _variate_ua()})
@@ -410,7 +430,7 @@ def get_rmb(start=None, end=None, prev=360, currency="USD/CNY"):
             rl.extend(r["records"])
 
             sepo_obj = sepn_obj - dt.timedelta(1)
-            sepn_obj = sepo_obj - dt.timedelta(360)
+            sepn_obj = sepo_obj - dt.timedelta(segs)
         headers.update({"user-agent": _variate_ua()})
         r = rpost_json(
             url.format(
@@ -458,7 +478,10 @@ def get_historical_from_ttjj_oversea(code, start=None, end=None):
         dt.datetime.strptime(end, "%Y%m%d") - dt.datetime.strptime(start, "%Y%m%d")
     ).days + 1
     r = rget_json(
-        "http://overseas.1234567.com.cn/overseasapi/OpenApiHander.ashx?api=HKFDApi&m=MethodJZ&hkfcode={hkfcode}&action=2&pageindex=0&pagesize={pagesize}&date1={startdash}&date2={enddash}&callback=".format(
+        (
+            "http://overseas.1234567.com.cn/overseasapi/OpenApiHander.ashx?api=HKFDApi&m=MethodJZ"
+            "&hkfcode={hkfcode}&action=2&pageindex=0&pagesize={pagesize}&date1={startdash}&date2={enddash}&callback="
+        ).format(
             hkfcode=get_hkfcode(code),
             pagesize=pagesize,
             startdash=start[:4] + "-" + start[4:6] + "-" + start[6:],
@@ -467,7 +490,7 @@ def get_historical_from_ttjj_oversea(code, start=None, end=None):
     )
     datalist = {"date": [], "close": []}
     for dd in r["Data"]:
-        datalist["date"].append(pd.to_datetime(dd["PDATE"]))
+        datalist["date"].append(pd_to_datetime(dd["PDATE"]))
         datalist["close"].append(dd["NAV"])
     df = pd.DataFrame(datalist)
     df = df[df["date"] <= end]
@@ -486,11 +509,17 @@ def get_portfolio_fromttjj(code, start=None, end=None):
     r = rget("http://fundf10.eastmoney.com/zcpz_{code}.html".format(code=code))
     s = BeautifulSoup(r.text, "lxml")
     table = s.find("table", class_="tzxq")
-    df = pd.read_html(str(table))[0]
-    df["date"] = pd.to_datetime(df["报告期"])
-    df["stock_ratio"] = df["股票占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
-    df["bond_ratio"] = df["债券占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
-    df["cash_ratio"] = df["现金占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
+    df = pd.read_html(io.StringIO(str(table)))[0]
+    df["date"] = pd_to_datetime(df["报告期"])
+    df["stock_ratio"] = (
+        df["股票占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
+    )
+    df["bond_ratio"] = (
+        df["债券占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
+    )
+    df["cash_ratio"] = (
+        df["现金占净比"].replace("---", "0%").apply(lambda s: _float(s[:-1]))
+    )
     #     df["dr_ratio"] = df["存托凭证占净比"].replace("---", "0%").apply(lambda s: xa.cons._float(s[:-1]))
     df["assets"] = df["净资产（亿元）"]
     df = df[::-1]
@@ -509,7 +538,7 @@ def get_fundshare_byjq(code, **kws):
         .filter(finance.FUND_SHARE_DAILY.date <= kws["end"])
         .order_by(finance.FUND_SHARE_DAILY.date)
     )
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd_to_datetime(df["date"])
     df = df[["date", "shares"]]
     return df
 
@@ -546,7 +575,7 @@ def get_futu_historical(code, start=None, end=None):
     return df
 
 
-def get_historical_fromsp(code, start=None, end=None, region="us", **kws):
+def get_historical_fromsp(code, start=None, end=None, region="www", **kws):
     """
     标普官网数据源
 
@@ -572,11 +601,14 @@ def get_historical_fromsp(code, start=None, end=None, region="us", **kws):
         flag = "three"
     else:
         flag = "ten"
-    url = "https://{region}.spindices.com/idsexport/file.xls?\
+    #     url = "https://{region}.spindices.com/idsexport/file.xls?\
+    # selectedModule=PerformanceGraphView&selectedSubModule=Graph\
+    # &yearFlag={flag}YearFlag&indexId={code}".format(
+    #         region=region, flag=flag, code=code
+    #     )
+    url = "https://{region}.spglobal.com/spdji/en/idsexport/file.xls?\
 selectedModule=PerformanceGraphView&selectedSubModule=Graph\
-&yearFlag={flag}YearFlag&indexId={code}".format(
-        region=region, flag=flag, code=code
-    )
+&yearFlag={flag}YearFlag&indexId={code}".format(region=region, flag=flag, code=code)
     r = rget(
         url,
         headers={
@@ -585,6 +617,7 @@ selectedModule=PerformanceGraphView&selectedSubModule=Graph\
             "sec-fetch-site": "same-origin",
             "sec-fetch-user": "?1",
             "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_4) AppleWebKit/537.36 (KHTML, like Gecko)",
         },
     )
     df = pd.read_excel(r.content, engine="xlrd")
@@ -592,7 +625,7 @@ selectedModule=PerformanceGraphView&selectedSubModule=Graph\
     df = df.iloc[6:]
     df = df.dropna()
     df["close"] = df["Unnamed: " + col]
-    df["date"] = pd.to_datetime(df["Unnamed: 0"])
+    df["date"] = pd_to_datetime(df["Unnamed: 0"])
     df = df[["date", "close"]]
     return df
 
@@ -620,9 +653,7 @@ def get_historical_frombb(code, start=None, end=None, **kws):
     else:
         years = "5_YEAR"
     url = "https://www.bloomberg.com/markets2/api/history/{code}/PX_LAST?\
-timeframe={years}&period=daily&volumePeriod=daily".format(
-        years=years, code=code
-    )
+timeframe={years}&period=daily&volumePeriod=daily".format(years=years, code=code)
     r = rget_json(
         url,
         headers={
@@ -636,7 +667,7 @@ timeframe={years}&period=daily&volumePeriod=daily".format(
     )
     df = pd.DataFrame(r[0]["price"])
     df["close"] = df["value"]
-    df["date"] = pd.to_datetime(df["dateTime"])
+    df["date"] = pd_to_datetime(df["dateTime"])
     df = df[["date", "close"]]
     return df
 
@@ -742,34 +773,32 @@ def get_historical_fromzzindex(code, start, end=None):
     """
     if code.startswith("ZZ"):
         code = code[2:]
-    start_obj = dt.datetime.strptime(start, "%Y%m%d")
-    fromnow = (today_obj() - start_obj).days
-    if fromnow < 20:
-        flag = "1%E4%B8%AA%E6%9C%88"
-    elif fromnow < 60:
-        flag = "3%E4%B8%AA%E6%9C%88"  # 个月
-    elif fromnow < 200:
-        flag = "1%E5%B9%B4"  # 年
-    else:
-        flag = "5%E5%B9%B4"
+    # start_obj = dt.datetime.strptime(start, "%Y%m%d")
+    # fromnow = (today_obj() - start_obj).days
+    # if fromnow < 20:
+    #     flag = "1%E4%B8%AA%E6%9C%88"
+    # elif fromnow < 60:
+    #     flag = "3%E4%B8%AA%E6%9C%88"  # 个月
+    # elif fromnow < 200:
+    #     flag = "1%E5%B9%B4"  # 年
+    # else:
+    #     flag = "5%E5%B9%B4"
+
     r = rget_json(
-        "http://www.csindex.com.cn/zh-CN/indices/index-detail/\
-{code}?earnings_performance={flag}&data_type=json".format(
-            code=code, flag=flag
+        "https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode={code}&startDate={start}&endDate={end}".format(
+            code=code, start=start, end=end
         ),
         headers={
             "Host": "www.csindex.com.cn",
-            "Referer": "http://www.csindex.com.cn/zh-CN/indices/index-detail/{code}".format(
-                code=code
-            ),
+            "Referer": "http://www.csindex.com.cn/",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_4) AppleWebKit/537.36",
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
         },
     )
-    df = pd.DataFrame(r)
-    df["date"] = pd.to_datetime(df["tradedate"])
-    df["close"] = df["tclose"].apply(_float)
+    df = pd.DataFrame(r["data"])
+    df["date"] = pd_to_datetime(df["tradeDate"])
+    df["close"] = df["close"].apply(_float)
     return df[["date", "close"]]
 
 
@@ -799,7 +828,7 @@ def get_historical_fromgzindex(code, start, end):
     )
     df = pd.DataFrame(r["data"]["data"], columns=r["data"]["item"])
 
-    df["date"] = pd.to_datetime(df["timestamp"])
+    df["date"] = pd_to_datetime(df["timestamp"])
     df = df[["date", "close", "open", "low", "high", "percent", "amount", "volume"]]
     # TODO: 是否有这些列不全的国证指数？
     df = df[::-1]
@@ -819,10 +848,10 @@ def get_historical_fromhzindex(code, start, end):
         code = code[2:]
 
     r = rget_json(
-        "http://www.chindices.com/index/values.val?code={code}".format(code=code)
+        "https://www.chindices.com/index/values.val?code={code}".format(code=code)
     )
     df = pd.DataFrame(r["data"])
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd_to_datetime(df["date"])
     df = df[["date", "price", "pctChange"]]
     df.rename(columns={"price": "close", "pctChange": "percent"}, inplace=True)
     df = df[::-1]
@@ -842,7 +871,7 @@ def get_historical_fromesunny(code, start=None, end=None):
     if code.startswith("ESCI"):
         code = code[4:] + ".ESCI"
     r = rget(
-        "http://www.esunny.com.cn/chartES/csv/shareday/day_易盛指数_{code}.es".format(
+        "https://www.esunny.com.cn/chartES/csv/shareday/day_易盛指数_{code}.es".format(
             code=code
         )
     )
@@ -854,7 +883,7 @@ def get_historical_fromesunny(code, start=None, end=None):
     df = pd.DataFrame(
         data, columns=["date", "open", "high", "low", "close", "settlement", "amount"]
     )
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd_to_datetime(df["date"])
     for c in ["open", "high", "low", "close", "settlement", "amount"]:
         df[c] = df[c].apply(_float)
     return df
@@ -916,6 +945,7 @@ def get_bond_rates(rating, date=None):
         "BB": "8a8b2ca0455847ac0145650ba23b68ff",
         "B": "8a8b2ca0455847ac0145650c3d726901",
     }
+
     # 上边字典不全，非常欢迎贡献 ：）
     def _fetch(date):
         r = rpost(
@@ -963,7 +993,7 @@ def get_macro(table, start, end, datecol="stat_year"):
         .filter(getattr(getattr(macro, table), datecol) <= end)
         .order_by(getattr(getattr(macro, table), datecol))
     )
-    df[datecol] = pd.to_datetime(df[datecol])
+    df[datecol] = pd_to_datetime(df[datecol])
     df["date"] = df[datecol]
     return df
 
@@ -996,19 +1026,25 @@ def _get_daily(
 
             4. 对于人民币中间价数据，使用 "USD/CNY" 的形式，具体可能的值可在 http://www.chinamoney.com.cn/chinese/bkccpr/ 历史数据的横栏查询，注意日元需要用 100JPY/CNY.
 
-            5. 对于所有可以在 cn.investing.com 网站查到的金融产品，其代码可以是该网站对应的统一代码，或者是网址部分，比如 DAX 30 的概览页面为 https://cn.investing.com/indices/germany-30，那么对应代码即为 "indices/germany-30"。也可去网页 inspect 手动查找其内部代码（一般不需要自己做，推荐直接使用网页url作为 code 变量值），手动 inspect 加粗的实时价格，其对应的网页 span class 中的 pid 的数值即为内部代码。
+            5. 对于所有可以在 cn.investing.com 网站查到的金融产品，其代码可以是该网站对应的统一代码，或者是网址部分，
+            比如 DAX 30 的概览页面为 https://cn.investing.com/indices/germany-30，那么对应代码即为 "indices/germany-30"。
+            也可去网页 inspect 手动查找其内部代码（一般不需要自己做，推荐直接使用网页url作为 code 变量值），
+            手动 inspect 加粗的实时价格，其对应的网页 span class 中的 pid 的数值即为内部代码。
 
             6. 对于国内发行的基金，使用基金代码，同时开头添加 F。若想考虑分红使用累计净值，则开头添加 T。
 
             7. 对于国内发行的货币基金，使用基金代码，同时开头添加 M。（全部按照净值数据处理）
 
-            8. 形如 peb-000807.XSHG 或 peb-SH000807 格式的数据，可以返回每周的指数估值情况，需要 enable 聚宽数据源方可查看。
+            8. 形如 peb-000807.XSHG 或 peb-SH000807 格式的数据，可以返回每周的指数估值情况（需要聚宽数据源）；
+            peb-SH600000 格式返回个股每日估值情况（雪球源）；peb-F000001 返回基金每周持仓穿透估值情况。
+
 
             9. 形如 iw-000807.XSHG 或 iw-SH000807 格式的数据，可以返回每月的指数成分股和实时权重，需要 enable 聚宽数据源方可查看。
 
             10. 形如 fs-SH501018 格式的数据，可以返回指定场内基金每日份额，需要 enable 聚宽数据源方可查看。
 
-            11. 形如 SP5475707.2 格式的数据，可以返回标普官网相关指数的日线数据（最近十年），id 5475707 部分可以从相关指数 export 按钮获取的链接中得到，小数点后的部分代表保存的列数。参考链接：https://us.spindices.com/indices/equity/sp-global-oil-index. 若SPC开头，则从中国网站获取。
+            11. 形如 SP5475707.2 格式的数据，可以返回标普官网相关指数的日线数据（最近十年），id 5475707 部分可以从相关指数 export 按钮获取的链接中得到，
+            小数点后的部分代表保存的列数。参考链接：https://us.spindices.com/indices/equity/sp-global-oil-index. 若SPC开头，则从中国网站获取。
 
             12. 形如 BB-FGERBIU:ID 格式的数据，对应网页 https://www.bloomberg.com/quote/FGERBIU:ID，可以返回彭博的数据（最近五年）
 
@@ -1018,7 +1054,9 @@ def _get_daily(
 
             15. 形如 YH-CSGOLD.SW 格式的数据，返回雅虎财经标的日线数据（最近十年）。代码来自标的网页 url：https://finance.yahoo.com/quote/CSGOLD.SW。
 
-            16. 形如 FT-22065529 格式的数据或 FT-INX:IOM，可以返回 financial times 的数据，推荐直接用后者。前者数字代码来源，打开浏览器 network 监视，切换图标时间轴时，会新增到 https://markets.ft.com/data/chartapi/series 的 XHR 请求，其 request payload 里的 [elements][symbol] 即为该指数对应数字。
+            16. 形如 FT-22065529 格式的数据或 FT-INX:IOM，可以返回 financial times 的数据，推荐直接用后者。
+            前者数字代码来源，打开浏览器 network 监视，切换图标时间轴时，会新增到 https://markets.ft.com/data/chartapi/series 的 XHR 请求，
+            其 request payload 里的 [elements][symbol] 即为该指数对应数字。
 
             17. 形如 FTC-WTI+Crude+Oil 格式的数据，开头可以是 FTC, FTE, FTX, FTF, FTB, FTI 对应 ft.com 子栏目 commdities，equities，currencies，funds，bonds，indicies。其中 FTI 和 FT 相同。
 
@@ -1032,9 +1070,12 @@ def _get_daily(
 
             22. 形如 pt-F100032 格式的数据，返回指定基金每季度股票债券和现金的持仓比例
 
-            23. 形如 yc-companies/DBP，yc-companies/DBP/price 格式的数据，返回ycharts股票、ETF数据，对应网页 https://ycharts.com/companies/DBP/price，最后部分为数据含义，默认price，可选：net_asset_value（仅ETF可用）、total_return_price、total_return_forward_adjusted_price、average_volume_30，历史数据限制五年内。
+            23. 形如 yc-companies/DBP，yc-companies/DBP/price 格式的数据，返回ycharts股票、ETF数据，
+            对应网页 https://ycharts.com/companies/DBP/price，最后部分为数据含义，默认price，可选：net_asset_value（仅ETF可用）、
+            total_return_price、total_return_forward_adjusted_price、average_volume_30，历史数据限制五年内。
 
-            24. 形如 yc-indices/^SPGSCICO，yc-indices/^SPGSCICO/level 格式的数据，返回ycharts指数数据，对应网页 https://ycharts.com/indices/%5ESPGSCICO/level，最后部分为数据含义，默认level，可选：total_return_forward_adjusted_price，历史数据限制五年内。
+            24. 形如 yc-indices/^SPGSCICO，yc-indices/^SPGSCICO/level 格式的数据，返回ycharts指数数据，
+            对应网页 https://ycharts.com/indices/%5ESPGSCICO/level，最后部分为数据含义，默认level，可选：total_return_forward_adjusted_price，历史数据限制五年内。
 
             25. 形如 HZ999001 HZ999005 格式的数据，代表了华证系列指数 http://www.chindices.com/indicator.html#
 
@@ -1085,15 +1126,23 @@ def _get_daily(
             _from = "SP"
         elif code.startswith("SPC") and code[3:].split(".")[0].isdigit():
             _from = "SPC"
-        elif code.startswith("ZZ") and code[4:].isdigit():  # 注意中证系列指数的代码里可能包含字母！
+        elif (
+            code.startswith("ZZ") and code[4:].isdigit()
+        ):  # 注意中证系列指数的代码里可能包含字母！
             _from = "ZZ"
-        elif code.startswith("GZ") and code[-3:].isdigit():  # 注意国证系列指数的代码里可能包含多个字母！
+        elif (
+            code.startswith("GZ") and code[-3:].isdigit()
+        ):  # 注意国证系列指数的代码里可能包含多个字母！
             _from = "GZ"
         elif code.startswith("HZ") and code[2:].isdigit():
             _from = "HZ"
         elif code.startswith("ESCI") and code[4:].isdigit():
             _from = "ES"
-        elif code.startswith("yc-companies/") or code.startswith("yc-indices/"):
+        elif (
+            code.startswith("yc-companies/")
+            or code.startswith("yc-indices/")
+            or code.startswith("yc-indicators/")
+        ):
             _from = "ycharts"
             params = code.split("/")
             code = params[1]
@@ -1105,6 +1154,8 @@ def _get_daily(
                     metric = "price"
                 elif category == "indices":
                     metric = "level"
+                elif category == "indicators":
+                    metric = "1"  # seems not important
         elif len(code.split("-")) >= 2 and len(code.split("-")[0]) <= 3:
             # peb-000807.XSHG
             _from = code.split("-")[0]
@@ -1248,13 +1299,13 @@ def _get_daily(
         return df
 
 
-def get_xueqiu_rt(code, token="a664afb60c7036c7947578ac1a5860c4cfb6b3b5"):
+def get_xueqiu_rt(code):
     if code.startswith("HK") and code[2:].isdigit():
         code = code[2:]
     url = "https://stock.xueqiu.com/v5/stock/quote.json?symbol={code}&extend=detail"
     r = rget_json(
         url.format(code=code),
-        cookies={"xq_a_token": token},
+        cookies=get_token(),
         headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_4)"},
     )
     n = r["data"]["quote"]["name"]
@@ -1268,7 +1319,7 @@ def get_xueqiu_rt(code, token="a664afb60c7036c7947578ac1a5860c4cfb6b3b5"):
     percent = r["data"]["quote"]["percent"]
     try:
         percent = _float(percent)
-    except:
+    except Exception:
         pass
     currency = r["data"]["quote"]["currency"]
     market = r["data"]["market"]["region"]
@@ -1388,18 +1439,26 @@ def get_cninvesting_rt(suburl, app=False):
 
 
 def get_rt_from_sina(code):
+    if code.startswith("sina-"):
+        code = code[5:]
     if (
         code.startswith("SH") or code.startswith("SZ") or code.startswith("HK")
     ) and code[2:].isdigit():
         tinycode = code[:2].lower() + code[2:]
         if code.startswith("HK"):  # 港股额外要求实时
             tinycode = "rt_" + tinycode
+    elif code.startswith("fx_s"):
+        tinycode = code
     else:  # 美股
         tinycode = "gb_"
         if code.startswith("."):
             code = code[1:]
         tinycode += code.lower()
-    r = rget("https://hq.sinajs.cn/list={tinycode}".format(tinycode=tinycode))
+    headers = {"Referer": "https://finance.sina.com.cn"}
+    r = rget(
+        "https://hq.sinajs.cn/list={tinycode}".format(tinycode=tinycode),
+        headers=headers,
+    )
     l = r.text.split("=")[1].split(",")
     d = {}
     d["name"] = l[0].strip('"')
@@ -1427,7 +1486,14 @@ def get_rt_from_sina(code):
             for i in range(20, 29)[::2]:
                 d["sell" + str(int((i - 18) / 2))] = (l[i + 1], l[i])
             d["current_ext"] = None
-
+    elif code.startswith("fx_s"):  # 外汇
+        # 'var hq_str_fx_sinrcny="12:43:37,0.085000,0.086000,0.085400,4,0.085400,0.085400,0.085000,0.085000,
+        # 印度卢比兑人民币即期汇率,-0.470000,-0.000400,0.004684,OTC Data Services Editorial Team Calculated Cross Rates.
+        # New York,0.081300,0.081300,*-****+*,2025-04-23";\n'
+        # TODO: column meaning check
+        d["time"] = l[0]
+        d["current"] = float(l[1])
+        d["name"] = l[9]
     else:
         d["currency"] = "USD"
         d["current"] = float(l[1])
@@ -1516,7 +1582,7 @@ def get_rt_from_ycharts(code):
     qdiv = s.select("div.index-rank.col-auto")  # current
     spans = [s for s in qdiv[0].contents if s != "\n" and s.contents]
     d = {}
-    d["name"] = s.select("h1,h3[class=securityName]")[0].text.strip()
+    d["name"] = s.find("ycn-quickflows-menu").get("securityname")
     d["current"], d["percent"] = (
         _float(spans[0].string),  # current,
         _float(spans[1].contents[-2].string[1:-1]),  # percent
@@ -1526,7 +1592,7 @@ def get_rt_from_ycharts(code):
         for c in s.select("span[class=index-info]")[0].string.split("\n")
         if c.strip()
     ]
-    d["time"] = l[1]
+    d["time"] = l[-1]
     d["currency"] = l[0].split(" ")[0].strip()
     d["market"] = None
     return d
@@ -1618,18 +1684,12 @@ def get_rt_from_ttjj(code):
     if s.findAll("dd", class_="dataNums")[1].find(
         "span", class_="ui-font-large"
     ):  # 非货币基金
-        value, date = (
-            float(
-                s.findAll("dd", class_="dataNums")[1]
-                .find("span", class_="ui-font-large")
-                .string
-            ),
-            str(s.findAll("dt")[1]).split("(")[1].split(")")[0][7:],
-        )
         estimate = s.select("span[id=gz_gsz]")
+        ind = 1
         if not estimate:
             estimate = None
             estimate_time = None
+            ind = 0
         else:
             estimate = estimate[0].text  # after loading
             if estimate == "--":
@@ -1644,7 +1704,7 @@ def get_rt_from_ttjj(code):
                     gsz_dict = eval(gsz.text[8:-2])
                     estimate = _float(gsz_dict["gsz"])
                     estimate_time = gsz_dict["gztime"]
-                except:
+                except Exception:
                     estimate = None
             else:
                 try:
@@ -1652,6 +1712,15 @@ def get_rt_from_ttjj(code):
                 except ValueError:
                     logger.warning("unrecognized estimate netvalue %s" % estimate)
                     estimate = None
+        value, date = (
+            float(
+                s.findAll("dd", class_="dataNums")[ind]
+                .find("span", class_="ui-font-large")
+                .string
+            ),
+            str(s.findAll("dt")[ind]).split("(")[1].split(")")[0][7:],
+        )
+
     else:
         value, date = (
             s.findAll("dd", class_="dataNums")[1].text,
@@ -1760,15 +1829,20 @@ def get_rt(
             )
             return get_cninvesting_rt(code, app=True)
     elif double_check and _from in ["xueqiu", "sina"]:
-        r1 = get_xueqiu_rt(code, token=get_token())
+        r1 = get_xueqiu_rt(code)
         r2 = get_rt_from_sina(code)
         if abs(r1["current"] / r2["current"] - 1) > double_check_threhold:
             raise DataPossiblyWrong("realtime data unmatch for %s" % code)
         return r2
     elif _from in ["xueqiu", "xq", "snowball"]:
         try:
-            return get_xueqiu_rt(code, token=get_token())
-        except (IndexError, ValueError, AttributeError, TypeError) as e:  # 默认雪球实时引入备份机制
+            return get_xueqiu_rt(code)
+        except (
+            IndexError,
+            ValueError,
+            AttributeError,
+            TypeError,
+        ) as e:  # 默认雪球实时引入备份机制
             logging.warning(
                 "Fails due to %s, now trying backup data source from sina" % e.args[0]
             )
@@ -1776,11 +1850,16 @@ def get_rt(
     elif _from in ["sina", "sn", "xinlang"]:
         try:
             return get_rt_from_sina(code)
-        except (IndexError, ValueError, AttributeError, TypeError) as e:  # 默认雪球实时引入备份机制
+        except (
+            IndexError,
+            ValueError,
+            AttributeError,
+            TypeError,
+        ) as e:  # 默认雪球实时引入备份机制
             logging.warning(
                 "Fails due to %s, now trying backup data source from xueqiu" % e.args[0]
             )
-            return get_xueqiu_rt(code, token=get_token())
+            return get_xueqiu_rt(code)
     elif _from in ["ttjj"]:
         return get_rt_from_ttjj(code)
     elif _from in ["FT", "ft", "FTI"]:
@@ -1904,7 +1983,7 @@ def cachedio(**ioconf):
             precached = ioconf.get("precached", None)
             precached = kws.get("precached", precached)
             key = kws.get("key", code)
-            key = key.replace("/", " ")
+            key = key.replace("/", " ").replace(":", " ")
             key_func = ioconf.get("key_func", None)
             key_func = ioconf.get("keyfunc", key_func)
             if key_func is not None:
@@ -1989,7 +2068,7 @@ def cachedio(**ioconf):
                             df0 = getattr(thismodule, "cached_dict")[key]
                         else:
                             raise ValueError("no %s option for backend" % backend)
-                        df0[date] = pd.to_datetime(df0[date])
+                        df0[date] = pd_to_datetime(df0[date])
                         # 向前延拓
                         is_changed = False
                         if df0.iloc[0][date] > start_obj and not fetchonly:
@@ -2004,7 +2083,9 @@ def cachedio(**ioconf):
                                     df1 = df1[df1["date"] <= kws["end"]]
                                 if df1 is not None and len(df1) > 0:
                                     is_changed = True
-                                    df0 = df1.append(df0, ignore_index=True, sort=False)
+                                    df0 = pd.concat(
+                                        [df1, df0], ignore_index=True, sort=False
+                                    )
                         # 向后延拓
                         if df0.iloc[-1][date] < end_obj and not fetchonly:
                             nextday_str = (
@@ -2015,7 +2096,9 @@ def cachedio(**ioconf):
                             else:  # 单日多行的表默认最后一日是准确的，不再刷新了
                                 kws["start"] = nextday_str
                             kws["end"] = end_str
-                            if has_weekday(nextday_str, kws["end"]):  # 新更新的日期里有工作日
+                            if has_weekday(
+                                nextday_str, kws["end"]
+                            ):  # 新更新的日期里有工作日
                                 df2 = f(*args, **kws)
                                 if df2 is not None and len(df2) > 0:
                                     df2 = df2[df2["date"] >= kws["start"]]
@@ -2026,7 +2109,9 @@ def cachedio(**ioconf):
                                         == 1
                                     ):
                                         df0 = df0.iloc[:-1]
-                                    df0 = df0.append(df2, ignore_index=True, sort=False)
+                                    df0 = pd.concat(
+                                        [df0, df2], ignore_index=True, sort=False
+                                    )
                             # 注意这里抹去更新了原有最后一天的缓存，这是因为日线最新一天可能有实时数据污染
 
                     except (FileNotFoundError, exc.ProgrammingError, KeyError) as e:
@@ -2146,13 +2231,12 @@ def _get_index_weight_range(code, start, end):
     df = pd.DataFrame({"code": [], "weight": [], "display_name": [], "date": []})
     while True:
         if d > end_m:
-
-            df["date"] = pd.to_datetime(df["date"])
+            df["date"] = pd_to_datetime(df["date"])
             return df
         logger.debug("fetch index weight on %s for %s" % (d, code))
         df0 = get_index_weights(index_id=code, date=d.strftime("%Y-%m-%d"))
         df0["code"] = df0.index
-        df = df.append(df0, ignore_index=True, sort=False)
+        df = pd.concat([df, df0], ignore_index=True, sort=False)
         d = d + relativedelta(months=1)
 
 
@@ -2187,6 +2271,8 @@ def get_stock_peb_range(code, start, end, wrapper=False):
     :param end:
     :return:
     """
+    if code.isdigit() and len(code) == 6:
+        code = ttjjcode(code)
     if code.startswith("HK") and code[2:].isdigit():
         code = code[2:]
     count = (today_obj() - dt.datetime.strptime(start, "%Y%m%d")).days
@@ -2274,7 +2360,7 @@ def get_fund_peb(code, date, threhold=0.3):
         return {"pe": None, "pb": None}
 
     pel, pbl = [], []
-    for i, r in df.iterrows():
+    for _, r in df.iterrows():
         try:
             fdf = get_daily("peb-" + r["scode"], end=date, prev=60)
             if len(fdf) == 0:
@@ -2288,7 +2374,8 @@ def get_fund_peb(code, date, threhold=0.3):
                 pbl.append(fdf["pb"])
         except (KeyError, TypeError, IndexError) as e:
             logger.warning(
-                "%s: 获取历史估值出现问题: %s, 可能由于网站故障或股票代码非中美市场" % (r["scode"], e.args[0])
+                "%s: 获取历史估值出现问题: %s, 可能由于网站故障或股票代码非中美市场"
+                % (r["scode"], e.args[0])
             )
             pel.append(None)
             pbl.append(None)
@@ -2412,7 +2499,7 @@ def get_sw_from_jq(code, start=None, end=None, **kws):
         .filter(finance.SW1_DAILY_VALUATION.code == code)
         .order_by(finance.SW1_DAILY_VALUATION.date.asc())
     )
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd_to_datetime(df["date"])
     return df
 
 
@@ -2425,7 +2512,11 @@ def get_teb(code, date):
     df = get_fundamentals(query(valuation).filter(valuation.code.in_(sl)), date=date)
     df["e"] = df["market_cap"] / df["pe_ratio"]
     df["b"] = df["market_cap"] / df["pb_ratio"]
-    return {"e": df["e"].sum(), "b": df["b"].sum(), "m": df["market_cap"].sum()}  # 亿人民币
+    return {
+        "e": df["e"].sum(),
+        "b": df["b"].sum(),
+        "m": df["market_cap"].sum(),
+    }  # 亿人民币
 
 
 def get_teb_range(code, start, end, freq="W-FRI"):
@@ -2634,9 +2725,7 @@ def get_bar_fromxq(code, prev, interval=3600):
         interval=interval,
         type_=type_,
     )
-    r = rget(
-        url, headers={"user-agent": "Mozilla/5.0"}, cookies={"xq_a_token": get_token()}
-    )
+    r = rget(url, headers={"user-agent": "Mozilla/5.0"}, cookies=get_token())
     if not r.text:
         return  # None
     else:
@@ -2725,7 +2814,7 @@ class vinfo(basicinfo, indicator):
         if not name:
             try:
                 name = get_rt(code)["name"]
-            except:
+            except Exception:
                 name = code
         self.name = name
         self.code = code

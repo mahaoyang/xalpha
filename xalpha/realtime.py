@@ -2,6 +2,7 @@
 """
 module for realtime watch and notfication
 """
+
 # deprecated
 # 该模块与现在的主线进展关系不大，可用性不强，
 # xalpha 不应过度干涉通知或可能的自动交易部分
@@ -64,7 +65,9 @@ def mail(
             receivestr += " <"
             receivestr += s
             receivestr += ">, "
-        msg["To"] = _format_addr(receivestr)  # 括号里的对应收件人邮箱昵称、收件人邮箱账号
+        msg["To"] = _format_addr(
+            receivestr
+        )  # 括号里的对应收件人邮箱昵称、收件人邮箱账号
         msg["Subject"] = title  # 邮件的主题，即标题
 
         server = smtplib.SMTP_SSL(server, port)  # 发件人邮箱中的SMTP服务器和端口号
@@ -122,11 +125,14 @@ def rfundinfo(
     rtdate = dt.datetime.combine(rt.time, dt.time.min)
     rtvalue = rt.rtvalue
     if (rtdate - fundobj.price.iloc[-1].date).days > 0:
-        fundobj.price = fundobj.price.append(
-            pd.DataFrame(
-                [[rtdate, rtvalue, fundobj.price.iloc[-1].totvalue, 0]],
-                columns=["date", "netvalue", "totvalue", "comment"],
-            ),
+        fundobj.price = pd.concat(
+            [
+                fundobj.price,
+                pd.DataFrame(
+                    [[rtdate, rtvalue, fundobj.price.iloc[-1].totvalue, 0]],
+                    columns=["date", "netvalue", "totvalue", "comment"],
+                ),
+            ],
             ignore_index=True,
         )
     return fundobj

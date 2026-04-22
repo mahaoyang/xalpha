@@ -1,14 +1,14 @@
-import sys
 import pytest
-
-sys.path.insert(0, "../")
 import xalpha as xa
 
 xa.set_backend(backend="memory", prefix="pytest-")
 
 
 def test_compare():
-    c = xa.Compare(("FT-JBGOUA:SWX:USD", "USD"), "SH501018", start="20200101")
+    # c = xa.Compare(("FT-JBGOUA:SWX:USD", "USD"), "SH501018", start="20200101")
+    # no code can be found for the previous one,
+    # seems to me lots of funds cannot be found in FT now
+    c = xa.Compare(("FT-GLD:PCQ:USD", "USD"), "SH501018", start="20200101")
     c.corr()
     c.v()
 
@@ -24,6 +24,7 @@ def test_overpriced():
 
 @pytest.mark.local
 def test_set_display():
+    pytest.importorskip("IPython")
     xa.set_display("notebook")
     df = xa.get_daily("PDD", prev=30)
     df._repr_javascript_()
@@ -31,6 +32,7 @@ def test_set_display():
     assert getattr(df, "_repre_javascript_", None) is None
 
 
+@pytest.mark.local
 def test_get_currency():
     assert (
         xa.toolbox.get_currency_code("indices/india-50-futures") == "currencies/inr-cny"
@@ -38,6 +40,7 @@ def test_get_currency():
     assert xa.toolbox._get_currency_code("JPY") == "100JPY/CNY"
 
 
+@pytest.mark.skip(reason="cninvesting server check")
 def test_qdii_predict():
     hb = xa.QDIIPredict(
         "SZ162411",

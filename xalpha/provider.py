@@ -17,7 +17,6 @@ except ImportError:
 
 from xalpha.exceptions import DataSourceNotFound
 
-
 thismodule = sys.modules[__name__]
 
 providers_list = ["jq"]

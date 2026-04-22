@@ -2,6 +2,7 @@
 """
 module for trade class
 """
+
 import math
 import datetime as dt
 import logging
@@ -11,7 +12,14 @@ from pyecharts.charts import Bar, Line
 from pyecharts import options as opts
 
 import xalpha.remain as rm
-from xalpha.cons import convert_date, line_opts, myround, xirr, yesterdayobj
+from xalpha.cons import (
+    convert_date,
+    line_opts,
+    myround,
+    xirr,
+    yesterdayobj,
+    pd_get_week,
+)
 from xalpha.exceptions import ParserFailure, TradeBehaviorError
 from xalpha.record import irecord
 import xalpha.universal as xu
@@ -108,6 +116,8 @@ def vtradevolume(cftable, freq="D", rendered=True):
     :returns: the Bar object
     """
     ### WARN: datazoom and time conflict, sliding till 1970..., need further look into pyeacharts
+    cftable = cftable.copy()
+    cftable["date"] = pd.to_datetime(cftable["date"])
     startdate = cftable.iloc[0]["date"]
     if freq == "D":
         # datedata = [d.to_pydatetime() for d in cftable["date"]]
@@ -123,24 +133,24 @@ def vtradevolume(cftable, freq="D", rendered=True):
             if row["cash"] < 0
         ]
     elif freq == "W":
-        cfmerge = cftable.groupby([cftable["date"].dt.year, cftable["date"].dt.week])[
-            "cash"
-        ].sum()
+        cfmerge = cftable.groupby(
+            [cftable["date"].dt.year, pd_get_week(cftable["date"])]
+        )["cash"].sum()
         # datedata = [
         #     dt.datetime.strptime(str(a) + "4", "(%Y, %W)%w")
-        #     for a, _ in cfmerge.iteritems()
+        #     for a, _ in cfmerge.items()
         # ]
         datedata = pd.date_range(
             startdate, yesterdayobj() + pd.Timedelta(days=7), freq="W-THU"
         )
         selldata = [
             [dt.datetime.strptime(str(a) + "4", "(%G, %V)%w"), b]
-            for a, b in cfmerge.iteritems()
+            for a, b in cfmerge.items()
             if b > 0
         ]
         buydata = [
             [dt.datetime.strptime(str(a) + "4", "(%G, %V)%w"), b]
-            for a, b in cfmerge.iteritems()
+            for a, b in cfmerge.items()
             if b < 0
         ]
         # %V pandas gives iso weeknumber which is different from python original %W or %U,
@@ -153,19 +163,19 @@ def vtradevolume(cftable, freq="D", rendered=True):
         ].sum()
         # datedata = [
         #     dt.datetime.strptime(str(a) + "15", "(%Y, %m)%d")
-        #     for a, _ in cfmerge.iteritems()
+        #     for a, _ in cfmerge.items()
         # ]
         datedata = pd.date_range(
             startdate, yesterdayobj() + pd.Timedelta(days=31), freq="MS"
         )
         selldata = [
             [dt.datetime.strptime(str(a) + "1", "(%Y, %m)%d"), b]
-            for a, b in cfmerge.iteritems()
+            for a, b in cfmerge.items()
             if b > 0
         ]
         buydata = [
             [dt.datetime.strptime(str(a) + "1", "(%Y, %m)%d"), b]
-            for a, b in cfmerge.iteritems()
+            for a, b in cfmerge.items()
             if b < 0
         ]
     else:
@@ -177,8 +187,8 @@ def vtradevolume(cftable, freq="D", rendered=True):
     datedata = list(datedata)
     bar.add_xaxis(xaxis_data=datedata)
     # buydata should before selldata, since emptylist in the first line would make the output fig empty: may be bug in pyecharts
-    bar.add_yaxis(series_name="买入", yaxis_data=buydata)
-    bar.add_yaxis(series_name="卖出", yaxis_data=selldata)
+    bar.add_yaxis("买入", buydata)
+    bar.add_yaxis("卖出", selldata)
     bar.set_global_opts(
         tooltip_opts=opts.TooltipOpts(
             is_show=True,
@@ -204,9 +214,11 @@ def vtradecost(
     """
     funddata = []
     costdata = []
+    end = convert_date(end)
     pprice = self.price[self.price["date"] <= end]
     pcftable = cftable
     if start is not None:
+        start = convert_date(start)
         pprice = pprice[pprice["date"] >= start]
         pcftable = pcftable[pcftable["date"] >= start]
     for _, row in pprice.iterrows():
@@ -220,8 +232,11 @@ def vtradecost(
 
     coords = []
     # pcftable = pcftable[abs(pcftable["cash"]) > threhold]
-    for i, r in pcftable.iterrows():
-        coords.append([r.date, pprice[pprice["date"] <= r.date].iloc[-1]["netvalue"]])
+    for _, r in pcftable.iterrows():
+        if r.cash != 0:
+            coords.append(
+                [r.date, pprice[pprice["date"] <= r.date].iloc[-1]["netvalue"]]
+            )
 
     upper = pcftable.cash.abs().max()
     lower = pcftable.cash.abs().min()
@@ -233,7 +248,6 @@ def vtradecost(
         if buy < 0:
             color = "#ff7733"
         else:
-
             color = "#3366ff"
         size = (abs(buy) - lower) / (upper - lower) * 5 + 5
         return opts.MarkPointItem(
@@ -323,9 +337,11 @@ class trade:
             self.remtable = pd.DataFrame([], columns=["date", "rem"])
         else:
             self.remtable = remtable
-        self.status = status.loc[:, ["date", code]]
-        self.status = self.status[self.status[code] != 0]
-        self._arrange()
+        self.status = status
+        if status is not None:
+            self.status = status.loc[:, ["date", code]]
+            self.status = self.status[self.status[code] != 0]
+            self._arrange()
 
     def _arrange(self):
         self.recorddate_set = set(self.status.date)
@@ -370,7 +386,7 @@ class trade:
             # 凭直觉这个地方的处理很可能还有其他 issue
 
             if value > 0:
-                feelabel = 100 * value - int(100 * value)
+                feelabel = 100 * value - int(100 * value + 1e-6)
                 if round(feelabel, 1) == 0.5:
                     # binary encoding, 10000.005 is actually 10000.0050...1, see issue #59
                     feelabel = feelabel - 0.5
@@ -380,7 +396,7 @@ class trade:
                         feelabel *= 100
                 else:
                     feelabel = None
-                value = int(value * 100) / 100
+                value = int(value * 100 + 1e-6) / 100
                 assert feelabel is None or feelabel >= 0.0, "自定义申购费必须为正值"
                 rdate, cash, share = self.aim.shengou(value, date, fee=feelabel)
                 rem = rm.buy([], share, rdate)
@@ -430,10 +446,14 @@ class trade:
             rem = self.remtable.iloc[-1].rem
             rdate = date
             if (lastdate in self.recorddate_set) and (date not in self.aim.zhesuandate):
-                # deal with buy and sell and label the fenhongzaitouru, namely one label a 0.05 in the original table to label fenhongzaitouru
+                # deal with buy and sell and label the fenhongzaitouru,
+                # namely one label a 0.05 in the original table to label fenhongzaitouru
                 value = self.status[self.status["date"] <= lastdate].iloc[-1].loc[code]
-                if date in self.aim.fenhongdate:  # 0.05 的分红行为标记，只有分红日才有效
+                if (
+                    date in self.aim.fenhongdate
+                ):  # 0.05 的分红行为标记，只有分红日才有效
                     fenhongmark = round(10 * value - int(10 * value), 1)
+                    # TODO: any rounding issue here for th int
                     if fenhongmark == 0.5 and label == 0:
                         label = 1  # fenhong reinvest
                         value = value - math.copysign(0.05, value)
@@ -442,25 +462,25 @@ class trade:
                         value = value - math.copysign(0.05, value)
 
                 if value > 0:  # value stands for purchase money
-                    feelabel = 100 * value - int(100 * value)
+                    feelabel = 100 * value - int(100 * value + 1e-6)
 
-                    if int(10 * feelabel) == 5:
+                    if int(10 * feelabel + 1e-6) == 5:
                         feelabel = (feelabel - 0.5) * 100
                     else:
                         feelabel = None
-                    value = int(value * 100) / 100
+                    value = int(value * 100 + 1e-6) / 100
                     rdate, dcash, dshare = self.aim.shengou(
                         value, date, fee=feelabel
                     )  # shengou fee is in the unit of percent, different than shuhui case
                     rem = rm.buy(rem, dshare, rdate)
 
                 elif value < -0.005:  # value stands for redemp share
-                    feelabel = int(100 * value) - 100 * value
-                    if int(10 * feelabel) == 5:
+                    feelabel = int(100 * value - 1e-6) - 100 * value
+                    if int(10 * feelabel + 1e-6) == 5:
                         feelabel = feelabel - 0.5
                     else:
                         feelabel = None
-                    value = int(value * 100) / 100
+                    value = int(value * 100 - 1e-6) / 100
                     rdate, dcash, dshare = self.aim.shuhui(
                         -value, date, self.remtable.iloc[-1].rem, fee=feelabel
                     )
@@ -517,12 +537,16 @@ class trade:
                 else:
                     raise ParserFailure("comments not recognized")
 
-        self.cftable = self.cftable.append(
-            pd.DataFrame([[rdate, cash, share]], columns=["date", "cash", "share"]),
+        self.cftable = pd.concat(
+            [
+                self.cftable,
+                pd.DataFrame([[rdate, cash, share]], columns=["date", "cash", "share"]),
+            ],
             ignore_index=True,
         )
-        self.remtable = self.remtable.append(
-            pd.DataFrame([[rdate, rem]], columns=["date", "rem"]), ignore_index=True
+        self.remtable = pd.concat(
+            [self.remtable, pd.DataFrame([[rdate, rem]], columns=["date", "rem"])],
+            ignore_index=True,
         )
 
     def xirrrate(self, date=yesterdayobj(), startdate=None, guess=0.01):
@@ -704,34 +728,42 @@ class itrade(trade):
     场内交易，只包含 cftable 现金流表
     """
 
-    def __init__(self, code, status, name=None):
+    def __init__(self, code, status, cftable=None, name=None):
         """
 
         :param code: str. 代码格式与 :func:`xalpha.universal.get_daily` 要求相同
         :param status: 记账单或 irecord 类。
+        :param cftable: pd.DataFrame. 现金流表，每行为不同变更日期，三列分别为 date，cash， share，
+            标记对于某个投资标的交易记录，该变量和 `status` 需要一个提供。
         :param name: Optional[str]. 可提供标的名称。
         """
         self.code = code
-        if isinstance(status, irecord):
-            self.status = status.filter(code)
+        self.cftable = cftable
+        if status is not None:
+            if isinstance(status, irecord):
+                self.status = status.filter(code)
+            else:
+                self.status = status[status.code == code]
+            start = self.status.iloc[0]["date"].strftime("%Y-%m-%d")
         else:
-            self.status = status[status.code == code]
+            start = cftable.iloc[0]["date"].strftime("%Y-%m-%d")
         # self.cftable = pd.DataFrame([], columns=["date", "cash", "share"])
         try:
-            self.price = xu.get_daily(
-                self.code, start=self.status.iloc[0]["date"].strftime("%Y-%m-%d")
-            )
+            self.price = xu.get_daily(self.code, start=start)
             self.price["netvalue"] = self.price["close"]
         except Exception as e:
             logger.warning(
                 "%s when trade trying to get daily price of %s" % (e, self.code)
             )
             self.price = None
-        self._arrange()
+        if self.cftable is None:
+            # 这里逻辑和 trade 有所不同，trade 的 cftable 后会继续根据 status 交易，
+            # 这里有 cftable 就不再继续交易，未来可能会更新成和 trade 一致的逻辑
+            self._arrange()
         if not name:
             try:
                 self.name = get_rt(code)["name"]
-            except:
+            except Exception:
                 self.name = code
         self.type_ = None
 
@@ -790,7 +822,9 @@ class itrade(trade):
                     d["cash"].append(0)
                     d["share"].append(r.share)  # 直接记录总的应增加+或减少的份额数
                 else:
-                    d["cash"].append(-r.value * r.share - abs(r.fee))  # 手续费总是正的，和买入同号
+                    d["cash"].append(
+                        -r.value * r.share - abs(r.fee)
+                    )  # 手续费总是正的，和买入同号
                     d["share"].append(r.share)
         self.cftable = pd.DataFrame(d)
 

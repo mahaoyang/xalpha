@@ -3,19 +3,22 @@
 modules for Object oriented toolbox which wrappers get_daily and some more
 """
 
+import datetime as dt
+import logging
 import re
 import sys
-import datetime as dt
+from collections import deque
+from functools import lru_cache, wraps
+
 import numpy as np
 import pandas as pd
-from collections import deque
-from functools import wraps, lru_cache
-import logging
-from scipy import stats
 from bs4 import BeautifulSoup
+from scipy import stats
 
 from xalpha.cons import (
     opendate,
+    opendate_dt,
+    pd_to_datetime,
     yesterday,
     next_onday,
     last_onday,
@@ -25,7 +28,6 @@ from xalpha.cons import (
     xnpv,
     xirr,
     rget,
-    rpost,
 )
 from xalpha.info import get_fund_holdings
 from xalpha.universal import (
@@ -89,11 +91,9 @@ def _set_display_notebook():
     """
     Initialize DataTable mode for pandas DataFrame represenation.
     """
-    from IPython.core.display import display, Javascript
+    from IPython.display import display, Javascript
 
-    display(
-        Javascript(
-            """
+    display(Javascript("""
             require.config({
                 paths: {
                     DT: '//cdn.datatables.net/1.10.20/js/jquery.dataTables.min',
@@ -101,9 +101,7 @@ def _set_display_notebook():
             });
             $('head').append('<link rel="stylesheet" type="text/css" href="//cdn.datatables.net/1.10.20/css/jquery.dataTables.min.css">');
             $('head').append('<style> td, th {{text-align: center;}}</style>')
-        """
-        )
-    )
+        """))
 
     def _repr_datatable_(self):
         # create table DOM
@@ -213,7 +211,7 @@ class IndexPEBHistory:
         else:
             try:
                 self.name = get_rt(self.scode)["name"]
-            except:
+            except Exception:
                 self.name = self.scode
             if not start:
                 start = "2012-01-01"  # 可能会出问题，对应指数还未有数据
@@ -546,11 +544,11 @@ class Compare:
                 currency = "CNY"  # 标的不做汇率调整
             codelist.append(code)
             df = xu.get_daily(code, start=start, end=end)
-            df = df[df.date.isin(opendate)]
+            df = df[df.date.isin(opendate_dt)]
             currency_code = _get_currency_code(currency)
             if currency_code:
                 cdf = xu.get_daily(currency_code, start=start, end=end)
-                cdf = cdf[cdf["date"].isin(opendate)]
+                cdf = cdf[cdf["date"].isin(opendate_dt)]
                 df = df.merge(right=cdf, on="date", suffixes=("_x", "_y"))
                 df[col] = df[col + "_x"] * df[col + "_y"]
             if normalize:
@@ -643,7 +641,7 @@ def BlackScholes(S, K, t, v, r=0.02, CallPutFlag="C"):
     def CND(X):
         return stats.norm.cdf(X)
 
-    d1 = (np.log(S / K) + (r + (v ** 2) / 2) * t) / (v * np.sqrt(t))
+    d1 = (np.log(S / K) + (r + (v**2) / 2) * t) / (v * np.sqrt(t))
     d2 = d1 - v * np.sqrt(t)
 
     if CallPutFlag in ["c", "C"]:
@@ -765,14 +763,15 @@ class CBCalculator:
         r.encoding = "utf-8"
         b = BeautifulSoup(r.text, "lxml")
         self.rlist = [
-            float(re.search(r"[\D]*([\d]*.[\d]*)[\s]*[\%]*", s).group(1))
+            float(re.search(r"[\D]*([\d]*.?[\d]*)[\s]*[\%]", s).group(1))
             for s in re.split("、|，", b.select("td[id=cpn_desc]")[0].string)
         ]
         td_redeem_price = b.select("td[id=redeem_price]")[0]
-        if td_redeem_price.sup:
+        if td_redeem_price.span:
             redeem_price = float(
                 re.match(
-                    r"\S+，合计到期赎回价(\d\d\d\.\d\d)元", td_redeem_price.sup["title"]
+                    r"\S+，合计到期赎回价(\d\d\d\.\d\d)元",
+                    td_redeem_price.span["title"],
                 ).group(1)
             )
             logger.info(
@@ -784,9 +783,12 @@ class CBCalculator:
             redeem_price = float(td_redeem_price.string)
         self.rlist.append(redeem_price)
         self.rlist[-1] -= self.rlist[-2]  # 最后一年不含息返多少
-        self.scode = (
-            b.select("td[class=jisilu_nav]")[0].contents[1].text.split("-")[1].strip()
-        )
+        stock_nm_div = b.find("div", class_="stock_nm")
+        self.scode = stock_nm_div.find("a", href=True)["href"].split("/")[-1]
+
+        # self.scode = (
+        #     b.select("td[class=jisilu_nav]")[0].contents[1].text.split("-")[1].strip()
+        # )
         self.scode = ttjjcode(self.scode)  # 标准化股票代码
         if not zgj:
             self.zgj = float(b.select("td[id=convert_price]")[0].string)  # 转股价
@@ -814,7 +816,7 @@ class CBCalculator:
                 if not self.name:
                     rt = get_rt(self.code)
                     self.name = rt["name"]
-            except:
+            except Exception:
                 self.name = "unknown"
             df = xu.get_daily(self.code, prev=100, end=self.date_obj.strftime("%Y%m%d"))
             self.cbp = df.iloc[-1]["close"]
@@ -1103,7 +1105,11 @@ def is_on(date, market="CN", no_trading_days=None):
         code = "indices/us-spx-500"
     elif market in ["GBP", "UK", "GB"]:
         code = "indices/uk-100"
-    elif market in ["GER", "EUR", "DE"]:  # 是否可以代表欧洲待考量, 还要警惕欧洲市场的美元计价标的
+    elif market in [
+        "GER",
+        "EUR",
+        "DE",
+    ]:  # 是否可以代表欧洲待考量, 还要警惕欧洲市场的美元计价标的
         code = "indices/germany-30"
     elif market in ["CHF", "SWI", "CH"]:
         code = "indices/switzerland-20"
@@ -1148,6 +1154,12 @@ def daily_increment(code, date, lastday=None, _check=False, warning_threhold=Non
             tds = xu.get_daily(code=code, end=date, prev=30, refresh=True)
             # 对于可能出现的拆合股情况，刷新该标的全局缓存
             tds = tds[tds["date"] <= date]
+            rough_ratio = tds.iloc[-1]["close"] / tds.iloc[-2]["close"]
+            if rough_ratio > 9.9 or rough_ratio < 0.11:
+                # 标的倍数异常，如 currencies/inr-cny
+                # 保护性策略
+                return 1
+
     if _check:
         date = date.replace("-", "").replace("/", "")
         date_obj = dt.datetime.strptime(date, "%Y%m%d")
@@ -1155,17 +1167,16 @@ def daily_increment(code, date, lastday=None, _check=False, warning_threhold=Non
         while tds.iloc[-1]["date"] < date_obj:
             # in case data is not up to date
             # 但是存在日本市场休市时间不一致的情况，估计美股也存在
-            if (
-                not is_on(
-                    date_obj.strftime("%Y%m%d"),
-                    get_market(code),
-                    no_trading_days=no_trading_days,
-                )
-                or (date_obj.strftime("%Y-%m-%d") in gap_info.get(code, []))
-            ):
+            if not is_on(
+                date_obj.strftime("%Y%m%d"),
+                get_market(code),
+                no_trading_days=no_trading_days,
+            ) or (date_obj.strftime("%Y-%m-%d") in gap_info.get(code, [])):
                 print("%s is closed on %s" % (code, date))
                 if not lastday:
-                    return 1  # 当日没有涨跌，这里暂时为考虑 _check 和 lastday 相同的的情形
+                    return (
+                        1  # 当日没有涨跌，这里暂时为考虑 _check 和 lastday 相同的的情形
+                    )
                 date_obj -= dt.timedelta(days=1)
             else:
                 raise DateMismatch(
@@ -1201,7 +1212,7 @@ def _smooth_pos(r, e, o):
     if pos > 1:
         pos = 1
     elif pos < 0.5:
-        pos = pos ** 0.6
+        pos = pos**0.6
 
     if abs(r) < 0.6:  # 实际波动小时参考意义有限，进行削弱
         pos = (pos + (3 - 5 * abs(r)) * o) / (4 - 5 * abs(r))
@@ -1251,7 +1262,6 @@ def evaluate_fluctuation(hdict, date, lastday=None, _check=None, warning_threhol
     for fundid, percent in hdict.items():
         ratio = daily_increment(fundid, date, lastday, _check, warning_threhold)
         if warning_threhold:
-
             # 额外检查，防止误算大幅分红和拆合股等为本身的价格变化，对于变化幅度小的拆合股与分红无法区别与价格变化
             if ratio > warning_threhold[0] or ratio < warning_threhold[1]:
                 logger.warning(
@@ -1459,8 +1469,8 @@ class QDIIPredict:
         if fetch:
             df = fetch_backend("t1-" + code)
             if df is not None:
-                df["date"] = pd.to_datetime(df["date"])
-                for i, r in df.iterrows():
+                df["date"] = pd_to_datetime(df["date"])
+                for _, r in df.iterrows():
                     self.set_t1(float(r["t1"]), r["date"].strftime("%Y-%m-%d"))
                     self.set_position(float(r["pos"]), r["date"].strftime("%Y-%m-%d"))
             else:  # nodf
@@ -1558,7 +1568,9 @@ class QDIIPredict:
                     else:
                         cday = last_onday(cday)
                     # 经过这个没报错，就表示数据源是最新的
-                if last_date_obj >= last_onday(self.today):  # 昨天数据已出，不需要再预测了
+                if last_date_obj >= last_onday(
+                    self.today
+                ):  # 昨天数据已出，不需要再预测了
                     print(
                         "no need to predict t-1 value since it has been out for %s"
                         % self.code
@@ -1748,7 +1760,9 @@ class QDIIPredict:
                 c = w / 100 * r["current"] / basev
             currency_code = get_currency_code(k)
             if currency_code:
-                c = c * daily_increment(currency_code, today_str)
+                c = c * daily_increment(
+                    currency_code, today_str, warning_threhold=(1.8, 0.15)
+                )
                 # TODO: 中间价未更新，但实时数据不检查问题也不大
             n += c
         n += (100 - t) / 100
@@ -1783,7 +1797,6 @@ class QDIIPredict:
         else:
             date = date.replace("/", "").replace("-", "")
         if date not in self.position_cache or refresh:
-
             fdict = scale_dict(self.t1dict.copy(), aim=100)
             l = kws.get("window", 4)
             q = kws.get("decay", 0.8)
@@ -1806,8 +1819,8 @@ class QDIIPredict:
                     lastday=last_onday(d).strftime("%Y-%m-%d"),
                 )
                 posl.append(s(real, pred, posl[-1]))
-            current_pos = sum([q ** i * posl[l - i - 1] for i in range(l)]) / sum(
-                [q ** i for i in range(l)]
+            current_pos = sum([q**i * posl[l - i - 1] for i in range(l)]) / sum(
+                [q**i for i in range(l)]
             )
             self.position_cache[date] = current_pos
         if not return_date:
@@ -1843,7 +1856,7 @@ class QDIIPredict:
         fq = deque([c / 100] * l, maxlen=l)
         current_pos = c / 100
         dl = pd.Series(pd.date_range(start=start, end=end))
-        dl = dl[dl.isin(opendate)]
+        dl = dl[dl.isin(opendate_dt)]
         for j, d in enumerate(dl):
             if j == 0:
                 continue
@@ -1863,8 +1876,8 @@ class QDIIPredict:
             fq.append(pos)
             fq[0] = c / 100  ## 模拟实际的无状态仓位分析
             if self.positions:
-                current_pos = sum([q ** i * fq[l - i - 1] for i in range(l)]) / sum(
-                    [q ** i for i in range(l)]
+                current_pos = sum([q**i * fq[l - i - 1] for i in range(l)]) / sum(
+                    [q**i for i in range(l)]
                 )
                 if current_pos > 1:
                     current_pos = 1
@@ -1900,7 +1913,7 @@ class QDIIPredict:
         # ud 预测涨的多
         # du 预测跌的多
         # dd 预测跌的少
-        for i, row in cpdf.iterrows():
+        for _, row in cpdf.iterrows():
             if row[col1] >= 0 and row[col2] > 0:
                 uu += 1
             elif row[col1] >= 0 >= row[col2]:
@@ -1947,5 +1960,5 @@ class QDIIPredict:
     @staticmethod
     def analyse_deviate(cpdf, col):
         l = np.array(cpdf[col])
-        d1, d2 = np.mean(np.abs(l)), np.sqrt(np.mean(l ** 2))
+        d1, d2 = np.mean(np.abs(l)), np.sqrt(np.mean(l**2))
         print("\n平均偏离: ", d1, "\n标准差偏离： ", d2)
